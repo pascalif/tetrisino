@@ -1,17 +1,7 @@
 /*
    One player Tetris game for Arduino Nano
 
-   Credits :
-   - Base code : Jae Yeong Bae  jocker.tistory.com
-   - Original music encoding by Luke Cyca : https://github.com/lukecyca/TetrisThemeArduino/blob/master/TetrisThemeArduino.ino
-   - Refactoring, optimizations, digits, score, speed, game modes, screensavers : Pascal Vergneau
-
-   More informations (standards, rules, ...) on Tetris game :
-   - http://colinfahey.com/tetris/tetris.html
-   - http://tetris.wikia.com/wiki/Tetris_Guideline
-
-   TODO list :
-   - Animation when new high score (in gotoGameOver())
+   Credits, tech details, todo list : cf README.md file
 */
 
 
