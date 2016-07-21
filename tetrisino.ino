@@ -383,26 +383,10 @@ void setState(byte newState) {
 
 
 // ===========================================================================================================
-void setup() {
-  delay(SETUP_INITIAL_PAUSE);
-
-  Serial.begin(9600);
-
-  pinMode(INPUT_PIN_BTN_START, INPUT);
-  pinMode(INPUT_PIN_BTN_ROTATE_RIGHT, INPUT);
-  pinMode(INPUT_PIN_BTN_ROTATE_LEFT, INPUT);
-  pinMode(INPUT_PIN_JOY_DOWN, INPUT_PULLUP);
-  pinMode(INPUT_PIN_JOY_RIGHT, INPUT_PULLUP);
-  pinMode(INPUT_PIN_JOY_LEFT, INPUT_PULLUP);
-  pinMode(INPUT_PIN_JOY_DROP, INPUT_PULLUP);
-  pinMode(INPUT_PIN_BTN_MODE_NEXT_PIECE, INPUT_PULLUP);
-  pinMode(INPUT_PIN_BTN_MODE_MALUS_LINES, INPUT_PULLUP);
-
-  g_digits.shutdown(MAX27_DIGITS_ID, false);
-  g_digits.setIntensity(MAX27_DIGITS_ID, MAX_DIGITS_INTENSITY);
-
-  // Show digits are OK
-  sayHello();
+// Define matrixes position
+// Usefull to do it not only at setup() time but also at each new game due to the fact that wires have a
+// tendency to micro cuts , thus reseting matrixes (otherwise until next power up).
+void initMatrixes(bool showWelcomeMessage) {
 
   // Order of matrixes, first one (0) being the closest to the Arduino
   // +---+---+
@@ -429,9 +413,8 @@ void setup() {
   g_matrix.setTextSize(1);
   g_matrix.setTextWrap(true);
 
-
-  // Show matrixes are OK at build time only
   /*
+    // Show that all matrixes are OK - to be used when installing and testing matrixes on the station at build time only
     g_matrix.setIntensity(1);
     g_matrix.fillScreen(PIXEL_OFF);
     g_matrix.write();
@@ -446,17 +429,44 @@ void setup() {
 
   // Check matrixes connections are in correct order
   // Letters are the indicators marked on the box.
-  g_matrix.drawChar( 0,  0, 'T', PIXEL_ON, 0, 1);
-  g_matrix.drawChar( 1,  8, 'e', PIXEL_ON, 0, 1);
-  g_matrix.drawChar( 2, 16, 't', PIXEL_ON, 0, 1);
-  g_matrix.drawChar( 8,  0, 'r', PIXEL_ON, 0, 1);
-  g_matrix.drawChar( 9,  8, 'i', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(10, 16, 's', PIXEL_ON, 0, 1);
-  g_matrix.write();
-  delay(1000);
+  if ( showWelcomeMessage ) {
+    g_matrix.drawChar( 0,  0, 'T', PIXEL_ON, 0, 1);
+    g_matrix.drawChar( 1,  8, 'e', PIXEL_ON, 0, 1);
+    g_matrix.drawChar( 2, 16, 't', PIXEL_ON, 0, 1);
+    g_matrix.drawChar( 8,  0, 'r', PIXEL_ON, 0, 1);
+    g_matrix.drawChar( 9,  8, 'i', PIXEL_ON, 0, 1);
+    g_matrix.drawChar(10, 16, 's', PIXEL_ON, 0, 1);
+    g_matrix.write();
+    delay(1000);
+  }
 
   g_matrix.fillScreen(PIXEL_OFF);
   g_matrix.write();
+}
+
+
+void setup() {
+  delay(SETUP_INITIAL_PAUSE);
+
+  Serial.begin(9600);
+
+  pinMode(INPUT_PIN_BTN_START, INPUT);
+  pinMode(INPUT_PIN_BTN_ROTATE_RIGHT, INPUT);
+  pinMode(INPUT_PIN_BTN_ROTATE_LEFT, INPUT);
+  pinMode(INPUT_PIN_JOY_DOWN, INPUT_PULLUP);
+  pinMode(INPUT_PIN_JOY_RIGHT, INPUT_PULLUP);
+  pinMode(INPUT_PIN_JOY_LEFT, INPUT_PULLUP);
+  pinMode(INPUT_PIN_JOY_DROP, INPUT_PULLUP);
+  pinMode(INPUT_PIN_BTN_MODE_NEXT_PIECE, INPUT_PULLUP);
+  pinMode(INPUT_PIN_BTN_MODE_MALUS_LINES, INPUT_PULLUP);
+
+  g_digits.shutdown(MAX27_DIGITS_ID, false);
+  g_digits.setIntensity(MAX27_DIGITS_ID, MAX_DIGITS_INTENSITY);
+
+  // Show digits are OK
+  sayHello();
+
+  initMatrixes(true);
 
   gotoGamePreparation();
 }
@@ -546,6 +556,8 @@ void gotoGameStart() {
   resetLevel();
 
   initializeRandomGenerator();
+
+  initMatrixes(false);
 
   g_digits.clearDisplay(MAX27_DIGITS_ID);
   g_matrix.fillScreen(PIXEL_OFF);
@@ -711,10 +723,12 @@ void loop()
   else if ( g_gameState == STATE_SCREENSAVER ) {
     // Exit screensaver
     if ( readAction() != ACTION_NONE ) {
+      initMatrixes(false);
       gotoGamePreparation();
     }
     // Change screensaver
     else if ( millis() > g_screensaver_start_ts ) {
+      initMatrixes(false);
       gotoScreenSaver();
     }
     // Continue screensaver
