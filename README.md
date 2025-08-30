@@ -30,8 +30,7 @@ More informations (standards, rules, ...) on Tetris game :
 + http://tetris.wikia.com/wiki/Tetris_Guideline
 
 ## TODO list
-+ Animation when new high score (in gotoGameOver())
-+ Save high scores in EEPROM
++ cf .ino file
 
 ## Credits
 + Base code : Jae Yeong Bae - jocker.tistory.com

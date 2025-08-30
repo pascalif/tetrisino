@@ -1,7 +1,7 @@
 /*
    One player Tetris game for Arduino Nano
 
-   Credits, tech details, todo list : cf README.md file
+   Credits, tech details : cf README.md file
 
    2025 edition
 
@@ -15,16 +15,22 @@
    Tools > Processor : ATMEGA328P (Old bootloader)
 
 BUGS
-- power switch
+- power switch avec un regulateur de tension ?
 
 TODOs
 - scroller le '...' en mode screensaver
+- Animation when new high score (in gotoGameOver())
+- flasher le backlit sur newlevel
+- random lignes : choisir le centre au hasard
 */
 
 
 // ===========================================================================================================
 // LIBRARIES
 // ===========================================================================================================
+
+// Save and load best scores
+#include <EEPROM.h>
 
 #include <SPI.h>
 
@@ -75,6 +81,8 @@ TODOs
 //#define FLAG_DEV_ENABLE_LOGS
 
 #define SERIAL_BAUD_SPEED 115200
+
+//#define FLAG_RESET_HIGH_SCORES_AT_BOOT
 
 
 // ----------------------------------------------------------
@@ -329,7 +337,7 @@ uint8_t g_gameState = STATE_BOOTING;
 uint16_t g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
 uint16_t g_score = 0;
 uint16_t g_nbLinesCompleted = 0;
-uint8_t g_level = 0;
+uint8_t g_level = 1;
 uint8_t g_konamiCodePosition = 0;
 
 uint8_t g_selectedScreenSaver = 0;
@@ -550,17 +558,70 @@ void setup() {
 
   setupDisplayScore();
 
+  loadHighScores();
+
   initOutputMatrices(true);
+
+  // TODO CLEAN
+  for (int i = 1; i <= 40; i++) {
+    adjustSpeedToLevel(i);
+    Serial.print(i);
+    Serial.print(":");
+    Serial.println(g_current_delay_between_auto_down);
+    Serial.print(", ");
+  }
 
   gotoGamePreparation();
 }
 
 
+void loadHighScores() {
+  // uint16_t g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
+
+#ifdef FLAG_RESET_HIGH_SCORES_AT_BOOT
+  // Overrides EPROM with following values
+  g_highScores[0][0] = 0;
+  g_highScores[0][1] = 0;
+  g_highScores[1][0] = 0;
+  g_highScores[1][1] = 0;
+
+  saveHighScores();
+#else
+
+  uint16_t loaded;
+  EEPROM.get(0, loaded);
+  g_highScores[0][0] = (loaded == 65535 ? 0 : loaded);
+  EEPROM.get(2, loaded);
+  g_highScores[0][1] = (loaded == 65535 ? 0 : loaded);
+  EEPROM.get(4, loaded);
+  g_highScores[1][0] = (loaded == 65535 ? 0 : loaded);
+  EEPROM.get(6, loaded);
+  g_highScores[1][1] = (loaded == 65535 ? 0 : loaded);
+
+#endif
+
+#ifdef FLAG_DEV_ENABLE_LOGS
+  Serial.println("High scores:");
+  Serial.println(g_highScores[0][0]);
+  Serial.println(g_highScores[0][1]);
+  Serial.println(g_highScores[1][0]);
+  Serial.println(g_highScores[1][1]);
+#endif
+}
+
+
+void saveHighScores() {
+  EEPROM.put(0, g_highScores[0][0]);
+  EEPROM.put(2, g_highScores[0][1]);
+  EEPROM.put(4, g_highScores[0][2]);
+  EEPROM.put(6, g_highScores[0][3]);
+}
+
 // ===========================================================================================================
 
 void sayZzz() {
 #ifdef FLAG_DEV_ENABLE_LOGS
-  Serial.println("Score display: saying '....'");
+  Serial.println("Saying '....'");
 #endif
 
   g_dispScore.clearDisplay(MAX7219_SCORE_ID);
@@ -614,7 +675,7 @@ for (int i = 0; i <= 7; i++) {
 
 void sayHello() {
 #ifdef FLAG_DEV_ENABLE_LOGS
-  Serial.println("Score display: saying 'Hello'");
+  Serial.println("Saying 'Hello'");
 #endif
 
   g_dispScore.clearDisplay(MAX7219_SCORE_ID);
@@ -630,7 +691,7 @@ void sayHello() {
 
 void sayStart() {
 #ifdef FLAG_DEV_ENABLE_LOGS
-  Serial.println("Score display: saying 'Start'");
+  Serial.println("Saying 'Start'");
 #endif
 
   g_dispScore.clearDisplay(MAX7219_SCORE_ID);
@@ -659,7 +720,7 @@ void gotoGamePreparation() {
   sayStart();
 
 #ifdef FLAG_DEV_READ_SERIAL_INPUTS
-  Serial.println("Keyboard inputs:  [i: Start], [jk: Rotate], [fdrg: Joystick]");
+  Serial.println("Keyboard: [i: Start] [jk: Rotate] [fdrg: Joystick]");
 #endif
 
   configureAndEnableInterrupt();
@@ -767,6 +828,31 @@ void incLevel() {
 }
 
 // ===========================================================================================================
+// delay
+// ^
+// |  + base1
+// |
+// |      -45 ms/lvl
+// |                 +
+// |                      -10 ms/lvl      +
+// |                                                     -5 ms/lvl
+// +--1----------- Lim1] -------------- Lim2] ----------------------------------> level
+
+#define DOWN_SPEED_BASE_1 500
+#define DOWN_SPEED_INCR_1 45
+#define DOWN_SPEED_LEVEL_LIMIT_1 9
+
+#define DOWN_SPEED_BASE_2 140
+#define DOWN_SPEED_INCR_2 10
+#define DOWN_SPEED_LEVEL_LIMIT_2 14
+
+#define DOWN_SPEED_BASE_3 90
+#define DOWN_SPEED_INCR_3 5
+
+// Algo :
+// level <= DOWN_SPEED_LEVEL_LIMIT_1 :  speed = DOWN_SPEED_BASE_1 - (level - 1) * DOWN_SPEED_INCR_1                          : [ 1:500 ; 2:455 ; ... ; 9:140 ]
+//       <= DOWN_SPEED_LEVEL_LIMIT_2          = DOWN_SPEED_BASE_2 - (level - DOWN_SPEED_LEVEL_LIMIT_1) * DOWN_SPEED_INCR_2   : [ 10:130, 11:120, 12:110, 13:100, 14:90]
+//        > DOWN_SPEED_LEVEL_LIMIT_2 :        = DOWN_SPEED_BASE_3 - (level - DOWN_SPEED_LEVEL_LIMIT_2) * DOWN_SPEED_INCR_3   : [ 15:85, 16:80, ...]
 
 void adjustSpeedToLevel(byte level) {
   if (level <= DOWN_SPEED_LEVEL_LIMIT_1) {
@@ -774,11 +860,11 @@ void adjustSpeedToLevel(byte level) {
   } else if (level <= DOWN_SPEED_LEVEL_LIMIT_2) {
     g_current_delay_between_auto_down = DOWN_SPEED_BASE_2 - (level - DOWN_SPEED_LEVEL_LIMIT_1) * DOWN_SPEED_INCR_2;
   } else {
-    g_current_delay_between_auto_down = DOWN_SPEED_LEVEL_LIMIT_2;
+    g_current_delay_between_auto_down = DOWN_SPEED_BASE_3 - (level - DOWN_SPEED_LEVEL_LIMIT_2) * DOWN_SPEED_INCR_3;
   }
 
 #ifdef FLAG_DEV_ENABLE_LOGS
-  Serial.print("New speed ");
+  Serial.print("New speed: ");
   Serial.println(g_current_delay_between_auto_down);
 #endif
 }
@@ -1950,6 +2036,8 @@ void gotoGameOver() {
     Serial.print("New high score ");
     Serial.println(g_highScores[g_modeNextBlock][g_modeMalusLines]);
 #endif
+
+    saveHighScores();
   }
 
   gameOverAnimation();

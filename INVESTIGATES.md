@@ -29,6 +29,12 @@ Avec ADebouncers:
 
 Instabilités
 ============
+En cas de n'importe quel problème (pas de démarrage, pas de réaction)
+==> DESACTIVER LES LOGS !!!
+Malgré les pourcentages ci-dessus, il peut y avoir des débordements très vites !!
+
+
+
 Si s'éteint/s'allume (en particulier bip on puis bip off du PC quand la facade arrière est connectée à l'usb du PC)
 Alors vérifier les résistances des cables VCC et GND avant/apres le master switch
   Si 80 Ohm de différence entre le VCC 5V de l'usb facade et la pin en sortie du switch : pas assez pour alimenter le Nano.
