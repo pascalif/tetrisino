@@ -15,7 +15,6 @@
    Tools > Processor : ATMEGA328P (Old bootloader)
 
 BUGS
-- joystick vers la gauche
 - power switch
 
 TODOs
@@ -64,12 +63,8 @@ TODOs
 // Set to true/false to enable/disable entering keys with Arduino's wired inputs (which is the final goal)
 #define FLAG_READ_REAL_INPUTS true
 
-
 // Uncomment this switch to enable music playing after Konami code (UUDDLRLR) has been entered
 #define FLAG_ENABLE_MUSIC
-
-// Uncomment this switch to tweak anti-bounce timers by having the labels of buttons (joystick & 2 rotations) that are in up-state sent to Serial.println
-//#define DEBUG_ANTI_BOUNCE_TIMERS
 
 // Uncomment to enable entering keys on keyboard
 // For prod version, comment this switch to save Flash memory
@@ -77,7 +72,7 @@ TODOs
 
 // Uncomment to log on serial monitor various events and user actions
 // For prod version, comment this switch to save Flash memory
-//#define FLAG_DEV_SERIAL_LOGS
+//#define FLAG_DEV_ENABLE_LOGS
 
 #define SERIAL_BAUD_SPEED 115200
 
@@ -138,18 +133,15 @@ TODOs
 // Display intensity of leds matrix (max : 255)
 #define MATRIX_INTENSITY 2
 
-// User actions anti-rebound delays
-#define SIDE_BUTTON_DELAY 120
-#define DOWN_BUTTON_DELAY 70
-#define DROP_BUTTON_DELAY 250
-#define START_BUTTON_DELAY 250
+// Debounce delays
+#define ROTATE_BUTTON_DEBOUNCE 30
+#define START_BUTTON_DEBOUNCE 50
+#define MODE_BUTTON_DEBOUNCE 100
 
-// This is less usefull for the rotation buttons because they are validated only when released
-// (ie it's not possible to let the button pushed to generate several rotate actions)
-// but yet, there could be mechanical rebounces
-#define ROTATE_BUTTON_DELAY 60
-
-#define MODE_BUTTON_DELAY 100
+// Delays before autorepeat
+#define SIDE_BUTTON_AUTOREPEAT_DELAY 110  // 120 is ok. Less than that, it's hard to move one column by one column
+#define DOWN_BUTTON_AUTOREPEAT_DELAY 60   // faster than lateral movement, nice to see fast down
+#define DROP_BUTTON_AUTOREPEAT_DELAY 250
 
 
 // Parameter to compute delays between auto down moves for levels before and after the level DOWN_SPEED_LEVEL_LIMIT_1
@@ -349,7 +341,6 @@ bool g_modeMalusLines = MODE_MALUS_LINES_ON;
 Metro g_metroMalusLines = Metro(MODE_MALUS_LINES_INTERVAL);
 ;
 
-unsigned long g_next_allowed_button_action_ts = 0;
 unsigned long g_next_allowed_auto_down_ts = 0;
 uint16_t g_current_delay_between_auto_down = 500;  // reinit at game startup
 
@@ -357,20 +348,16 @@ uint8_t g_nextBlockType = BLOCK_TYPE_NONE;
 uint8_t g_currentBlockType = BLOCK_TYPE_NONE;
 uint8_t g_blockRotation;
 
-// Anti bounce mechanism for switch buttons : the action is accepted
-// only with the transition LOW -> HIGH (ie: pushed to not pushed)
-bool g_debounce_startButtonBeingPushed = false;
-bool g_debounce_rotateLeftButtonBeingPushed = false;
-bool g_debounce_rotateRightButtonBeingPushed = false;
+// Debouncers for buttons
 ADebouncer g_debouncerStart;
 ADebouncer g_debouncerRotateLeft;
 ADebouncer g_debouncerRotateRight;
 ADebouncer g_debouncerModeMalus;
 ADebouncer g_debouncerModeShowNext;
 
-// Same kind of algo to protect against DROPs
-bool g_debounce_joystickDropBeingPushed = false;
-ADebouncer g_debouncerDrop;
+// Debouncer for joystick is done by hand because we want consecutive actions to be done within the same 'LOW' (pushed) state
+unsigned long g_nextAllowedJoystickAutoRepeatActionTS = 0;
+
 
 bool g_block[PLAYABLE_COLS][PLAYABLE_ROWS + 2];  // 2 extra for rotation
 bool g_pile[PLAYABLE_COLS][PLAYABLE_ROWS];       // Row 0 = TOP
@@ -430,7 +417,7 @@ void configureAndEnableInterrupt() {
 void setState(byte newState) {
   if (newState == g_gameState) return;
 
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.print("New state ");
   Serial.println(newState);
   Serial.flush();
@@ -445,7 +432,7 @@ void setState(byte newState) {
 // Usefull to do it not only at setup() time but also at each new game due to the fact that wires have a
 // tendency to micro cuts , thus reseting matrixes (otherwise until next power up).
 void initOutputMatrices(bool showWelcomeMessage) {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Matrices: initialization");
 #endif
 
@@ -501,7 +488,7 @@ void initOutputMatrices(bool showWelcomeMessage) {
 
     // Check matrices connections are in correct order
     // Letters are the indicators marked on the box.
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
     Serial.println("Matrices: displaying Tetris");
 #endif
 
@@ -532,19 +519,6 @@ void setupDisplayScore() {
 
   // Show digits are OK
   sayHello();
-
-  // TODO clean test intensity
-  g_matrix.drawChar(1, 1, 'I', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(2, 8, 'n', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(3, 16, 't', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(8, 0, 'e', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(9, 8, 'n', PIXEL_ON, 0, 1);
-  g_matrix.drawChar(10, 16, 's', PIXEL_ON, 0, 1);
-  g_matrix.write();
-  for (int i = 0; i < 255; i++) {
-    g_matrix.setIntensity(i);
-    delay(15);
-  }
 }
 
 void setup() {
@@ -562,17 +536,16 @@ void setup() {
   pinMode(INPUT_PIN_BTN_MODE_NEXT_PIECE, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_MODE_MALUS_LINES, INPUT_PULLUP);
 
-  g_debouncerStart.mode(debounce_t::DELAYED, START_BUTTON_DELAY, HIGH);         // HIGH because INPUT_PULLUP
-  g_debouncerRotateLeft.mode(debounce_t::DELAYED, ROTATE_BUTTON_DELAY, HIGH);   // HIGH because INPUT_PULLUP
-  g_debouncerRotateRight.mode(debounce_t::DELAYED, ROTATE_BUTTON_DELAY, HIGH);  // HIGH because INPUT_PULLUP
-  g_debouncerDrop.mode(debounce_t::DELAYED, DROP_BUTTON_DELAY, HIGH);           // HIGH because INPUT_PULLUP
-  g_debouncerModeShowNext.mode(debounce_t::DELAYED, MODE_BUTTON_DELAY, HIGH);   // HIGH because INPUT_PULLUP
-  g_debouncerModeMalus.mode(debounce_t::DELAYED, MODE_BUTTON_DELAY, HIGH);      // HIGH because INPUT_PULLUP
+  g_debouncerStart.mode(debounce_t::DELAYED, START_BUTTON_DEBOUNCE, HIGH);         // HIGH because INPUT_PULLUP
+  g_debouncerRotateLeft.mode(debounce_t::DELAYED, ROTATE_BUTTON_DEBOUNCE, HIGH);   // HIGH because INPUT_PULLUP
+  g_debouncerRotateRight.mode(debounce_t::DELAYED, ROTATE_BUTTON_DEBOUNCE, HIGH);  // HIGH because INPUT_PULLUP
+  g_debouncerModeShowNext.mode(debounce_t::DELAYED, MODE_BUTTON_DEBOUNCE, HIGH);   // HIGH because INPUT_PULLUP
+  g_debouncerModeMalus.mode(debounce_t::DELAYED, MODE_BUTTON_DEBOUNCE, HIGH);      // HIGH because INPUT_PULLUP
 
 
   pinMode(OUTPUT_PIN_BACKLIGHT, OUTPUT);
 
-  // Do not initialize pieo pin here, it generates background noise
+  // Do not initialize piezo pin here, it generates background noise
   //pinMode(OUTPUT_PIN_PWM_PIEZO, OUTPUT);
 
   setupDisplayScore();
@@ -586,7 +559,7 @@ void setup() {
 // ===========================================================================================================
 
 void sayZzz() {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Score display: saying '....'");
 #endif
 
@@ -640,7 +613,7 @@ for (int i = 0; i <= 7; i++) {
 
 
 void sayHello() {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Score display: saying 'Hello'");
 #endif
 
@@ -656,7 +629,7 @@ void sayHello() {
 
 
 void sayStart() {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Score display: saying 'Start'");
 #endif
 
@@ -684,6 +657,10 @@ void gotoGamePreparation() {
   setState(STATE_GAME_WAIT_START);
 
   sayStart();
+
+#ifdef FLAG_DEV_READ_SERIAL_INPUTS
+  Serial.println("Keyboard inputs:  [i: Start], [jk: Rotate], [fdrg: Joystick]");
+#endif
 
   configureAndEnableInterrupt();
 }
@@ -736,9 +713,7 @@ void resetGridAndBuffers() {
 
 // ===========================================================================================================
 void gotoGameStart() {
-#ifdef FLAG_DEV_SERIAL_LOGS
-  Serial.print("Free memory : ");
-  Serial.println(freeMemory());  // Nécessite une fonction comme celle-ci : https://learn.adafruit.com/memories-of-an-arduino/optimizing-sram
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Starting game");
 #endif
 
@@ -783,7 +758,7 @@ void resetLevel() {
 void incLevel() {
   g_level++;
 
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.print("Level up ");
   Serial.println(g_level);
 #endif
@@ -802,7 +777,7 @@ void adjustSpeedToLevel(byte level) {
     g_current_delay_between_auto_down = DOWN_SPEED_LEVEL_LIMIT_2;
   }
 
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.print("New speed ");
   Serial.println(g_current_delay_between_auto_down);
 #endif
@@ -842,16 +817,7 @@ void loop() {
     }
 
     if (bGameStillRunning) {
-      byte action = readAction();
-
-#ifdef DEBUG_ANTI_BOUNCE_TIMERS
-      if (action != ACTION_NONE) {
-        Serial.print("Action : ");
-        Serial.print(action);
-        Serial.print(" ts=");
-        Serial.println(millis());
-      }
-#endif
+      uint8_t action = readAction();
 
       if (action == ACTION_BTN_ROTATE_RIGHT) rotateBlock(true);  // version ok
       else if (action == ACTION_BTN_ROTATE_LEFT) rotateBlock(false);
@@ -866,7 +832,7 @@ void loop() {
       gotoGameOver();
       resetGridAndBuffers();
       g_konamiCodePosition = 0;
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
       Serial.println("GAME OVER");
 #endif
     }
@@ -887,23 +853,23 @@ void loop() {
 
     readGameModes();
 
-    byte button = readAction();
+    uint8_t action = readAction();
 
-    if (g_konamiCodePosition == 0 && button == ACTION_JOY_DROP) g_konamiCodePosition = 1;
-    else if (g_konamiCodePosition == 1 && button == ACTION_JOY_DROP) g_konamiCodePosition = 2;
-    else if (g_konamiCodePosition == 2 && button == ACTION_JOY_DOWN) g_konamiCodePosition = 3;
-    else if (g_konamiCodePosition == 3 && button == ACTION_JOY_DOWN) g_konamiCodePosition = 4;
-    else if (g_konamiCodePosition == 4 && button == ACTION_JOY_LEFT) g_konamiCodePosition = 5;
-    else if (g_konamiCodePosition == 5 && button == ACTION_JOY_RIGHT) g_konamiCodePosition = 6;
-    else if (g_konamiCodePosition == 6 && button == ACTION_JOY_LEFT) g_konamiCodePosition = 7;
-    else if (g_konamiCodePosition == 7 && button == ACTION_JOY_RIGHT) {
+    if (g_konamiCodePosition == 0 && action == ACTION_JOY_DROP) g_konamiCodePosition = 1;
+    else if (g_konamiCodePosition == 1 && action == ACTION_JOY_DROP) g_konamiCodePosition = 2;
+    else if (g_konamiCodePosition == 2 && action == ACTION_JOY_DOWN) g_konamiCodePosition = 3;
+    else if (g_konamiCodePosition == 3 && action == ACTION_JOY_DOWN) g_konamiCodePosition = 4;
+    else if (g_konamiCodePosition == 4 && action == ACTION_JOY_LEFT) g_konamiCodePosition = 5;
+    else if (g_konamiCodePosition == 5 && action == ACTION_JOY_RIGHT) g_konamiCodePosition = 6;
+    else if (g_konamiCodePosition == 6 && action == ACTION_JOY_LEFT) g_konamiCodePosition = 7;
+    else if (g_konamiCodePosition == 7 && action == ACTION_JOY_RIGHT) {
       g_konamiCodePosition = 0;
 
       animationLevelUp();
       playTetrisTheme();
     }
 
-    else if (button == ACTION_BTN_START) {
+    else if (action == ACTION_BTN_START) {
       gotoGameStart();
     }
   }
@@ -1128,94 +1094,77 @@ void copyBlockColumn(byte srcCol, byte tgtCol) {
 }
 
 // ===========================================================================================================
-byte readAction() {
-  if (millis() < g_next_allowed_button_action_ts) {
-    return ACTION_NONE;
+
+uint8_t readAction() {
+  uint8_t action = readActionNoLog();
+#ifdef FLAG_DEV_ENABLE_LOGS
+  if (action != ACTION_NONE) {
+    Serial.print("State: ");
+    Serial.print(g_gameState);
+    Serial.print(", action: ");
+    Serial.print(action);
+    Serial.print(", ts=");
+    Serial.println(millis());
   }
+#endif
+  return action;
+}
+
+uint8_t readActionNoLog() {
 
   int incomingByte = 0;
 #ifdef FLAG_DEV_READ_SERIAL_INPUTS
   if (Serial.available() > 0) {
     incomingByte = Serial.read();
+    if (incomingByte == 10) return ACTION_NONE;  // '\n'
+    Serial.println(incomingByte);
   }
 #endif
 
-  // Buttons with INPUT_PULLUP have LOW state when pushed
+  // Buttons with INPUT_PULLUP have LOW state when pushed.
+  // ".falling()" = button having being pushed and not yet released
+  // .rising() could work but it's less for user XP nice IMHO
 
   // Rotations
+  // ---------
   g_debouncerRotateLeft.debounce(digitalRead(INPUT_PIN_BTN_ROTATE_LEFT));
   if (incomingByte == 'j' || FLAG_READ_REAL_INPUTS && g_debouncerRotateLeft.falling()) return ACTION_BTN_ROTATE_LEFT;
 
   g_debouncerRotateRight.debounce(digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT));
   if (incomingByte == 'k' || FLAG_READ_REAL_INPUTS && g_debouncerRotateRight.falling()) return ACTION_BTN_ROTATE_RIGHT;
 
-  /*
-  if (FLAG_READ_REAL_INPUTS && !g_debounce_rotateRightButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == LOW) {
-    g_debounce_rotateRightButtonBeingPushed = true;
+
+  // Joystick
+  // --------
+  if (millis() < g_nextAllowedJoystickAutoRepeatActionTS) {
     return ACTION_NONE;
-  } else if (incomingByte == 'k' || FLAG_READ_REAL_INPUTS && g_debounce_rotateRightButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == HIGH) {
-    g_next_allowed_button_action_ts = millis() + ROTATE_BUTTON_DELAY;
-    g_debounce_rotateRightButtonBeingPushed = false;
-    return ACTION_BTN_ROTATE_RIGHT;
   }
 
-  if (FLAG_READ_REAL_INPUTS && !g_debounce_rotateLeftButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == LOW) {
-    g_debounce_rotateLeftButtonBeingPushed = true;
-    return ACTION_NONE;
-  } else if (incomingByte == 'j' || FLAG_READ_REAL_INPUTS && g_debounce_rotateLeftButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == HIGH) {
-    g_next_allowed_button_action_ts = millis() + ROTATE_BUTTON_DELAY;
-    g_debounce_rotateLeftButtonBeingPushed = false;
-    return ACTION_BTN_ROTATE_LEFT;
-  }
-*/
-  // Joystick
   if (incomingByte == 'f' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DOWN) == LOW) {
-    g_next_allowed_button_action_ts = millis() + DOWN_BUTTON_DELAY;
+    g_nextAllowedJoystickAutoRepeatActionTS = millis() + DOWN_BUTTON_AUTOREPEAT_DELAY;
     return ACTION_JOY_DOWN;
   }
 
   if (incomingByte == 'd' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_LEFT) == LOW) {
-    g_next_allowed_button_action_ts = millis() + SIDE_BUTTON_DELAY;
+    g_nextAllowedJoystickAutoRepeatActionTS = millis() + SIDE_BUTTON_AUTOREPEAT_DELAY;
     return ACTION_JOY_LEFT;
   }
 
   if (incomingByte == 'g' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_RIGHT) == LOW) {
-    g_next_allowed_button_action_ts = millis() + SIDE_BUTTON_DELAY;
+    g_nextAllowedJoystickAutoRepeatActionTS = millis() + SIDE_BUTTON_AUTOREPEAT_DELAY;
     return ACTION_JOY_RIGHT;
   }
 
-  // DROP button with debounce mechanism
-  g_debouncerDrop.debounce(digitalRead(INPUT_PIN_JOY_DROP));
-  if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && g_debouncerDrop.falling()) return ACTION_JOY_DROP;
-
-
-  // The action is accepted only with the transition HIGH -> LOW (center position to DROP position)
-  /*   if (FLAG_READ_REAL_INPUTS && !g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
-    g_debounce_joystickDropBeingPushed = true;
-    return ACTION_NONE;
-  } else if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == HIGH) {
-    g_next_allowed_button_action_ts = millis() + DROP_BUTTON_DELAY;
-    g_debounce_joystickDropBeingPushed = false;
+  if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
+    g_nextAllowedJoystickAutoRepeatActionTS = millis() + DROP_BUTTON_AUTOREPEAT_DELAY;
     return ACTION_JOY_DROP;
-  } */
+  }
 
-  // TODO Clean if debounce DROP is OK
-  //   if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
-  //     g_next_allowed_button_action_ts = millis() + DROP_BUTTON_DELAY;
-  //     return ACTION_JOY_DROP;
-  //   }
 
   // Start (the least important button is processed last)
+  // -----
   g_debouncerStart.debounce(digitalRead(INPUT_PIN_BTN_START));
   if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debouncerStart.falling()) return ACTION_BTN_START;
-
-  //   if (FLAG_READ_REAL_INPUTS && !g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == LOW) {
-  //     g_debounce_startButtonBeingPushed = true;
-  //     return ACTION_NONE;
-  //   } else if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == HIGH) {
-  //     g_debounce_startButtonBeingPushed = false;
-  //     return ACTION_BTN_START;
-  //   }
 
   return ACTION_NONE;
 }
@@ -1997,7 +1946,7 @@ void gotoGameOver() {
   if (score > g_highScores[g_modeNextBlock][g_modeMalusLines]) {
     g_highScores[g_modeNextBlock][g_modeMalusLines] = score;
 
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
     Serial.print("New high score ");
     Serial.println(g_highScores[g_modeNextBlock][g_modeMalusLines]);
 #endif
@@ -2267,7 +2216,7 @@ void updateLEDBuffer() {
 
 // ===========================================================================================================
 void showPlayableZoneOnSerial() {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.print("===== LVL:");
   Serial.print(g_level);
   Serial.print(" SPD:");
@@ -2561,7 +2510,7 @@ byte bass_note_count = sizeof(bass_symbolic_freqs) / sizeof(unsigned short);
 
 
 void playTetrisTheme() {
-#ifdef FLAG_DEV_SERIAL_LOGS
+#ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Music");
   Serial.flush();
 #endif

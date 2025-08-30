@@ -21,10 +21,10 @@ Avec juste ENABLE_MUSIC
 	Global variables use 1723 bytes (84%) of dynamic memory, leaving 325 bytes for local variables. Maximum is 2048 bytes.
 	=> CA FONCTIONNE
 
-
-avec ADebouncer non nettoye:
-Sketch uses 24442 bytes (79%) of program storage space. Maximum is 30720 bytes.
-Global variables use 1774 bytes (86%) of dynamic memory, leaving 274 bytes for local variables. Maximum is 2048 bytes.
+Avec ADebouncers:
+	Sketch uses 24306 bytes (79%) of program storage space. Maximum is 30720 bytes.
+	Global variables use 1765 bytes (86%) of dynamic memory, leaving 283 bytes for local variables. Maximum is 2048 bytes.
+	=> CA FONCTIONNE
 
 
 Instabilités
