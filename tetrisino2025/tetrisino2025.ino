@@ -15,7 +15,6 @@
    Tools > Processor : ATMEGA328P (Old bootloader)
 
 BUGS
-- chiffre des centaines ?
 - joystick vers la gauche
 - power switch
 
@@ -41,7 +40,7 @@ TODOs
 #include <Adafruit_GFX.h>
 
 // For the 8 7-segments-digits
-// To install it, include "LedControl" in Libraries manager
+// To install it, include "LedControl" in Libraries manager - 2025-08 : v1.0.6
 // Doc: https://wayoda.github.io/LedControl/
 #include <LedControl.h>
 
@@ -75,6 +74,8 @@ TODOs
 // Uncomment to log on serial monitor various events and user actions
 // For prod version, comment this switch to save Flash memory
 //#define FLAG_DEV_SERIAL_LOGS
+
+#define SERIAL_BAUD_SPEED 115200
 
 
 // ----------------------------------------------------------
@@ -140,9 +141,8 @@ TODOs
 
 // This is less usefull for the rotation buttons because they are validated only when released
 // (ie it's not possible to let the button pushed to generate several rotate actions)
-// but still nice to avoid flooding and too quick rotations
+// but yet, there could be mechanical rebounces
 #define ROTATE_BUTTON_DELAY 60
-
 
 // Parameter to compute delays between auto down moves for levels before and after the level DOWN_SPEED_LEVEL_LIMIT_1
 #define DOWN_SPEED_BASE_1 500
@@ -325,36 +325,42 @@ TODOs
 // GLOBALS VARIABLES
 // ===========================================================================================================
 
-byte g_gameState = STATE_BOOTING;
-unsigned short g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
-unsigned short g_score = 0;
-short g_nbLinesCompleted = 0;
-byte g_level = 0;
-byte g_konamiCodePosition = 0;
+uint8_t g_gameState = STATE_BOOTING;
+uint16_t g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
+uint16_t g_score = 0;
+uint16_t g_nbLinesCompleted = 0;
+uint8_t g_level = 0;
+uint8_t g_konamiCodePosition = 0;
 
-byte g_selectedScreenSaver = 0;
-byte g_screensaver_internal_state = 0;     // specific to each animation
+uint8_t g_selectedScreenSaver = 0;
+uint8_t g_screensaver_internal_state = 0;  // specific to each animation
 unsigned long g_screensaver_start_ts = 0;  // start TS of first or next screensaver
 
-boolean g_modeNextBlock = MODE_NEXT_BLOCK_ON;
-boolean g_modeMalusLines = MODE_MALUS_LINES_ON;
+bool g_modeNextBlock = MODE_NEXT_BLOCK_ON;
+bool g_modeMalusLines = MODE_MALUS_LINES_ON;
 Metro g_metroMalusLines = Metro(MODE_MALUS_LINES_INTERVAL);
 ;
 
 unsigned long g_next_allowed_button_action_ts = 0;
 unsigned long g_next_allowed_auto_down_ts = 0;
-short g_current_delay_between_auto_down = 500;  // reinit at game startup
+uint16_t g_current_delay_between_auto_down = 500;  // reinit at game startup
 
-byte g_nextBlockType = BLOCK_TYPE_NONE;
-byte g_currentBlockType = BLOCK_TYPE_NONE;
-byte g_blockRotation;
-bool g_startButtonPushed = false;
-bool g_rotateLeftButtonPushed = false;
-bool g_rotateRightButtonPushed = false;
+uint8_t g_nextBlockType = BLOCK_TYPE_NONE;
+uint8_t g_currentBlockType = BLOCK_TYPE_NONE;
+uint8_t g_blockRotation;
 
-boolean g_block[PLAYABLE_COLS][PLAYABLE_ROWS + 2];  // 2 extra for rotation
-boolean g_pile[PLAYABLE_COLS][PLAYABLE_ROWS];       // Row 0 = TOP
-boolean g_disp[PLAYABLE_COLS][PLAYABLE_ROWS];
+// Anti bounce mechanism for switch buttons : the action is accepted
+// only with the transition LOW -> HIGH (ie: pushed to not pushed)
+bool g_debounce_startButtonBeingPushed = false;
+bool g_debounce_rotateLeftButtonBeingPushed = false;
+bool g_debounce_rotateRightButtonBeingPushed = false;
+
+// Same kind of algo to protect against DROPs
+bool g_debounce_joystickDropBeingPushed = false;
+
+bool g_block[PLAYABLE_COLS][PLAYABLE_ROWS + 2];  // 2 extra for rotation
+bool g_pile[PLAYABLE_COLS][PLAYABLE_ROWS];       // Row 0 = TOP
+bool g_disp[PLAYABLE_COLS][PLAYABLE_ROWS];
 
 Max72xxPanel g_matrix = Max72xxPanel(MAX7219_MATRIX_PIN_CS, MATRIX_ELEMENTS_HORIZONTAL, MATRIX_ELEMENTS_VERTICAL);
 
@@ -368,9 +374,9 @@ Max72xxPanel g_matrix = Max72xxPanel(MAX7219_MATRIX_PIN_CS, MATRIX_ELEMENTS_HORI
 
 LedControl g_dispScore = LedControl(MAX7219_SCORE_PIN_DIN, MAX7219_SCORE_PIN_CLK, MAX7219_SCORE_PIN_CS, 1);
 
-boolean g_interruptsEnabled = true;
+bool g_interruptsEnabled = true;
 
-byte g_matrix_refresh_iteration_count = 0;
+uint8_t g_matrix_refresh_iteration_count = 0;
 
 // Warning : there are also static variables in screen savers animations
 
@@ -512,14 +518,27 @@ void setupDisplayScore() {
 
   // Show digits are OK
   sayHello();
+
+  // TODO clean test intensity
+  g_matrix.drawChar(1, 1, 'I', PIXEL_ON, 0, 1);
+  g_matrix.drawChar(2, 8, 'n', PIXEL_ON, 0, 1);
+  g_matrix.drawChar(3, 16, 't', PIXEL_ON, 0, 1);
+  g_matrix.drawChar(8, 0, 'e', PIXEL_ON, 0, 1);
+  g_matrix.drawChar(9, 8, 'n', PIXEL_ON, 0, 1);
+  g_matrix.drawChar(10, 16, 's', PIXEL_ON, 0, 1);
+  g_matrix.write();
+  for (int i = 0; i < 255; i++) {
+    g_matrix.setIntensity(i);
+    delay(15);
+  }
 }
 
 void setup() {
   delay(SETUP_INITIAL_PAUSE);
 
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD_SPEED);
 
-  pinMode(INPUT_PIN_BTN_START, INPUT);
+  pinMode(INPUT_PIN_BTN_START, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_ROTATE_RIGHT, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_ROTATE_LEFT, INPUT_PULLUP);
   pinMode(INPUT_PIN_JOY_DOWN, INPUT_PULLUP);
@@ -1095,21 +1114,21 @@ byte readAction() {
   // Buttons with INPUT_PULLUP or PULL-DOWN resistor have LOW state when pushed
 
   // Rotations
-  if (FLAG_READ_REAL_INPUTS && !g_rotateRightButtonPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == LOW) {
-    g_rotateRightButtonPushed = true;
+  if (FLAG_READ_REAL_INPUTS && !g_debounce_rotateRightButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == LOW) {
+    g_debounce_rotateRightButtonBeingPushed = true;
     return ACTION_NONE;
-  } else if (incomingByte == 'k' || FLAG_READ_REAL_INPUTS && g_rotateRightButtonPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == HIGH) {
+  } else if (incomingByte == 'k' || FLAG_READ_REAL_INPUTS && g_debounce_rotateRightButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == HIGH) {
     g_next_allowed_button_action_ts = millis() + ROTATE_BUTTON_DELAY;
-    g_rotateRightButtonPushed = false;
+    g_debounce_rotateRightButtonBeingPushed = false;
     return ACTION_BTN_ROTATE_RIGHT;
   }
 
-  if (FLAG_READ_REAL_INPUTS && !g_rotateLeftButtonPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == LOW) {
-    g_rotateLeftButtonPushed = true;
+  if (FLAG_READ_REAL_INPUTS && !g_debounce_rotateLeftButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == LOW) {
+    g_debounce_rotateLeftButtonBeingPushed = true;
     return ACTION_NONE;
-  } else if (incomingByte == 'j' || FLAG_READ_REAL_INPUTS && g_rotateLeftButtonPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == HIGH) {
+  } else if (incomingByte == 'j' || FLAG_READ_REAL_INPUTS && g_debounce_rotateLeftButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_LEFT) == HIGH) {
     g_next_allowed_button_action_ts = millis() + ROTATE_BUTTON_DELAY;
-    g_rotateLeftButtonPushed = false;
+    g_debounce_rotateLeftButtonBeingPushed = false;
     return ACTION_BTN_ROTATE_LEFT;
   }
 
@@ -1129,17 +1148,29 @@ byte readAction() {
     return ACTION_JOY_RIGHT;
   }
 
-  if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
+  // DROP button with debounce mechanism
+  // The action is accepted only with the transition HIGH -> LOW (center position to DROP position)
+  if (FLAG_READ_REAL_INPUTS && !g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
+    g_debounce_joystickDropBeingPushed = true;
+    return ACTION_NONE;
+  } else if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == HIGH) {
     g_next_allowed_button_action_ts = millis() + DROP_BUTTON_DELAY;
+    g_debounce_joystickDropBeingPushed = false;
     return ACTION_JOY_DROP;
   }
 
-  // Start
-  if (FLAG_READ_REAL_INPUTS && !g_startButtonPushed && digitalRead(INPUT_PIN_BTN_START) == LOW) {
-    g_startButtonPushed = true;
+  // TODO Clean if debounce DROP is OK
+  //   if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
+  //     g_next_allowed_button_action_ts = millis() + DROP_BUTTON_DELAY;
+  //     return ACTION_JOY_DROP;
+  //   }
+
+  // Start (the least important button is processed last)
+  if (FLAG_READ_REAL_INPUTS && !g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == LOW) {
+    g_debounce_startButtonBeingPushed = true;
     return ACTION_NONE;
-  } else if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_startButtonPushed && digitalRead(INPUT_PIN_BTN_START) == HIGH) {
-    g_startButtonPushed = false;
+  } else if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == HIGH) {
+    g_debounce_startButtonBeingPushed = false;
     return ACTION_BTN_START;
   }
 
