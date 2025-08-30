@@ -48,6 +48,10 @@ TODOs
 // Download it from https://github.com/markruys/arduino-Max72xxPanel
 #include <Max72xxPanel.h>
 
+// To debounce buttons
+// To install it, include "ADebouncer" in Libraries manager - 2025-08 : v1.1.0
+#include "ADebouncer.h"
+
 
 // ===========================================================================================================
 // CUSTOMIZABLE BEHAVIOUR
@@ -138,11 +142,15 @@ TODOs
 #define SIDE_BUTTON_DELAY 120
 #define DOWN_BUTTON_DELAY 70
 #define DROP_BUTTON_DELAY 250
+#define START_BUTTON_DELAY 250
 
 // This is less usefull for the rotation buttons because they are validated only when released
 // (ie it's not possible to let the button pushed to generate several rotate actions)
 // but yet, there could be mechanical rebounces
 #define ROTATE_BUTTON_DELAY 60
+
+#define MODE_BUTTON_DELAY 100
+
 
 // Parameter to compute delays between auto down moves for levels before and after the level DOWN_SPEED_LEVEL_LIMIT_1
 #define DOWN_SPEED_BASE_1 500
@@ -354,9 +362,15 @@ uint8_t g_blockRotation;
 bool g_debounce_startButtonBeingPushed = false;
 bool g_debounce_rotateLeftButtonBeingPushed = false;
 bool g_debounce_rotateRightButtonBeingPushed = false;
+ADebouncer g_debouncerStart;
+ADebouncer g_debouncerRotateLeft;
+ADebouncer g_debouncerRotateRight;
+ADebouncer g_debouncerModeMalus;
+ADebouncer g_debouncerModeShowNext;
 
 // Same kind of algo to protect against DROPs
 bool g_debounce_joystickDropBeingPushed = false;
+ADebouncer g_debouncerDrop;
 
 bool g_block[PLAYABLE_COLS][PLAYABLE_ROWS + 2];  // 2 extra for rotation
 bool g_pile[PLAYABLE_COLS][PLAYABLE_ROWS];       // Row 0 = TOP
@@ -548,6 +562,14 @@ void setup() {
   pinMode(INPUT_PIN_BTN_MODE_NEXT_PIECE, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_MODE_MALUS_LINES, INPUT_PULLUP);
 
+  g_debouncerStart.mode(debounce_t::DELAYED, START_BUTTON_DELAY, HIGH);         // HIGH because INPUT_PULLUP
+  g_debouncerRotateLeft.mode(debounce_t::DELAYED, ROTATE_BUTTON_DELAY, HIGH);   // HIGH because INPUT_PULLUP
+  g_debouncerRotateRight.mode(debounce_t::DELAYED, ROTATE_BUTTON_DELAY, HIGH);  // HIGH because INPUT_PULLUP
+  g_debouncerDrop.mode(debounce_t::DELAYED, DROP_BUTTON_DELAY, HIGH);           // HIGH because INPUT_PULLUP
+  g_debouncerModeShowNext.mode(debounce_t::DELAYED, MODE_BUTTON_DELAY, HIGH);   // HIGH because INPUT_PULLUP
+  g_debouncerModeMalus.mode(debounce_t::DELAYED, MODE_BUTTON_DELAY, HIGH);      // HIGH because INPUT_PULLUP
+
+
   pinMode(OUTPUT_PIN_BACKLIGHT, OUTPUT);
 
   // Do not initialize pieo pin here, it generates background noise
@@ -559,6 +581,7 @@ void setup() {
 
   gotoGamePreparation();
 }
+
 
 // ===========================================================================================================
 
@@ -714,6 +737,8 @@ void resetGridAndBuffers() {
 // ===========================================================================================================
 void gotoGameStart() {
 #ifdef FLAG_DEV_SERIAL_LOGS
+  Serial.print("Free memory : ");
+  Serial.println(freeMemory());  // Nécessite une fonction comme celle-ci : https://learn.adafruit.com/memories-of-an-arduino/optimizing-sram
   Serial.println("Starting game");
 #endif
 
@@ -786,8 +811,12 @@ void adjustSpeedToLevel(byte level) {
 // ===========================================================================================================
 
 void readGameModes() {
-  g_modeNextBlock = (digitalRead(INPUT_PIN_BTN_MODE_NEXT_PIECE) == 1 ? MODE_NEXT_BLOCK_ON : MODE_NEXT_BLOCK_OFF);
-  g_modeMalusLines = (digitalRead(INPUT_PIN_BTN_MODE_MALUS_LINES) == 1 ? MODE_MALUS_LINES_ON : MODE_MALUS_LINES_OFF);
+
+  g_modeNextBlock = (g_debouncerModeShowNext.debounce(digitalRead(INPUT_PIN_BTN_MODE_NEXT_PIECE)) ? MODE_NEXT_BLOCK_ON : MODE_NEXT_BLOCK_OFF);
+  g_modeMalusLines = (g_debouncerModeMalus.debounce(digitalRead(INPUT_PIN_BTN_MODE_MALUS_LINES)) ? MODE_MALUS_LINES_ON : MODE_MALUS_LINES_OFF);
+
+  //   g_modeNextBlock = (digitalRead(INPUT_PIN_BTN_MODE_NEXT_PIECE) == 1 ? MODE_NEXT_BLOCK_ON : MODE_NEXT_BLOCK_OFF);
+  //   g_modeMalusLines = (digitalRead(INPUT_PIN_BTN_MODE_MALUS_LINES) == 1 ? MODE_MALUS_LINES_ON : MODE_MALUS_LINES_OFF);
 }
 
 // ===========================================================================================================
@@ -1111,9 +1140,16 @@ byte readAction() {
   }
 #endif
 
-  // Buttons with INPUT_PULLUP or PULL-DOWN resistor have LOW state when pushed
+  // Buttons with INPUT_PULLUP have LOW state when pushed
 
   // Rotations
+  g_debouncerRotateLeft.debounce(digitalRead(INPUT_PIN_BTN_ROTATE_LEFT));
+  if (incomingByte == 'j' || FLAG_READ_REAL_INPUTS && g_debouncerRotateLeft.falling()) return ACTION_BTN_ROTATE_LEFT;
+
+  g_debouncerRotateRight.debounce(digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT));
+  if (incomingByte == 'k' || FLAG_READ_REAL_INPUTS && g_debouncerRotateRight.falling()) return ACTION_BTN_ROTATE_RIGHT;
+
+  /*
   if (FLAG_READ_REAL_INPUTS && !g_debounce_rotateRightButtonBeingPushed && digitalRead(INPUT_PIN_BTN_ROTATE_RIGHT) == LOW) {
     g_debounce_rotateRightButtonBeingPushed = true;
     return ACTION_NONE;
@@ -1131,7 +1167,7 @@ byte readAction() {
     g_debounce_rotateLeftButtonBeingPushed = false;
     return ACTION_BTN_ROTATE_LEFT;
   }
-
+*/
   // Joystick
   if (incomingByte == 'f' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DOWN) == LOW) {
     g_next_allowed_button_action_ts = millis() + DOWN_BUTTON_DELAY;
@@ -1149,15 +1185,19 @@ byte readAction() {
   }
 
   // DROP button with debounce mechanism
+  g_debouncerDrop.debounce(digitalRead(INPUT_PIN_JOY_DROP));
+  if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && g_debouncerDrop.falling()) return ACTION_JOY_DROP;
+
+
   // The action is accepted only with the transition HIGH -> LOW (center position to DROP position)
-  if (FLAG_READ_REAL_INPUTS && !g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
+  /*   if (FLAG_READ_REAL_INPUTS && !g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
     g_debounce_joystickDropBeingPushed = true;
     return ACTION_NONE;
   } else if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && g_debounce_joystickDropBeingPushed && digitalRead(INPUT_PIN_JOY_DROP) == HIGH) {
     g_next_allowed_button_action_ts = millis() + DROP_BUTTON_DELAY;
     g_debounce_joystickDropBeingPushed = false;
     return ACTION_JOY_DROP;
-  }
+  } */
 
   // TODO Clean if debounce DROP is OK
   //   if (incomingByte == 'r' || FLAG_READ_REAL_INPUTS && digitalRead(INPUT_PIN_JOY_DROP) == LOW) {
@@ -1166,13 +1206,16 @@ byte readAction() {
   //   }
 
   // Start (the least important button is processed last)
-  if (FLAG_READ_REAL_INPUTS && !g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == LOW) {
-    g_debounce_startButtonBeingPushed = true;
-    return ACTION_NONE;
-  } else if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == HIGH) {
-    g_debounce_startButtonBeingPushed = false;
-    return ACTION_BTN_START;
-  }
+  g_debouncerStart.debounce(digitalRead(INPUT_PIN_BTN_START));
+  if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debouncerStart.falling()) return ACTION_BTN_START;
+
+  //   if (FLAG_READ_REAL_INPUTS && !g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == LOW) {
+  //     g_debounce_startButtonBeingPushed = true;
+  //     return ACTION_NONE;
+  //   } else if (incomingByte == 'i' || FLAG_READ_REAL_INPUTS && g_debounce_startButtonBeingPushed && digitalRead(INPUT_PIN_BTN_START) == HIGH) {
+  //     g_debounce_startButtonBeingPushed = false;
+  //     return ACTION_BTN_START;
+  //   }
 
   return ACTION_NONE;
 }
