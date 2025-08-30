@@ -37,3 +37,19 @@ More informations (standards, rules, ...) on Tetris game :
 + Base code : Jae Yeong Bae - jocker.tistory.com
 + Original music encoding : Luke Cyca - https://github.com/lukecyca/TetrisThemeArduino/blob/master/TetrisThemeArduino.ino
 + Refactoring, optimizations, above listed features : Pascal Vergneau
+
+
+Fonctionnement des USBs:
+=======================
+
+Le choix a été fait que
+- l'Arduino est alimenté UNIQUEMENT depuis son entrée USB (et non pas par sa pin VCC)
+- toutes les VCC des périphériques (matrice 6xMAX7219, score MAX7219, boutons, piezo, top backlight) sont connectées sur le 5V de sortie du Nano.
+
+Cela permet :
+- même alimentation (pas besoin de changer/ajouter) des cables par l'USB de la facade arrière, qui est branchée
+	- soit d'un cable USB depuis un transfo 220V
+	- soit par un cable USB depuis un PC
+
+- le mode programmation depuis le PC est opérationnel depuis l'USB arrière (car les fils vert et blancs sont réinjectés dans le cable USB bleu du Nano, en plus de 5V & GND).
+  On pourrait en cas de vrai pb, également déconnecter l'USB bleu du nano et mettre directement un USB PC pour faire l'upload du programme, et les périphériques n'auraient pas besoin d'être réalimentés différemment
