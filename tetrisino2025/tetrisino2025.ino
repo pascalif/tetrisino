@@ -17,11 +17,12 @@
 BUGS
 - power switch avec un regulateur de tension ?
 
+TESTS
+
 TODOs
 - scroller le '...' en mode screensaver
-- Animation when new high score (in gotoGameOver())
-- flasher le backlit sur newlevel
-- random lignes : choisir le centre au hasard
+- Dès que high score : afficher "H" dans la colonne de droite
+- In case of SRAM memory issue ? Merge g_block & g_pile & g_disp into a single array of uint8_t
 */
 
 
@@ -109,21 +110,52 @@ TODOs
 
 
 // ----------------------------------------------------------
-// Animations & g_display
+// Screensavers management
 // ----------------------------------------------------------
 
-// Time we stay on the preparation screen before starting one the screensavers
-#define SCREENSAVER_DELAY_BEFORE 20000
+#define SCREENSAVER_ID_MADFLY 0
+#define SCREENSAVER_ID_LASER 1
+#define SCREENSAVER_ID_HIGH_SCORES 2
+#define SCREENSAVER_ID_SPIN_LINES 3
+#define SCREENSAVER_MAX_ID 3
 
-// Duration of a screensaver before switching to another
+// Time we stay on the preparation screen before starting one of the screensavers
+#define SCREENSAVER_DELAY_BEFORE 15000
+
+// Duration of a screensaver before switching to another one beyond the available pool
 #define SCREENSAVER_DURATION 20000
 
-// Screensaver 'Fly' : animation speed
-#define SCREENSAVER_FLY_SPEED 30
+
+// Screensaver 'MadFly' : animation speed
+#define SCREENSAVER_MADFLY_DELAY 40
+
 
 // Screensaver 'HighScores' : animation speed
-#define SCREENSAVER_HIGHSCORES_SPEED 70
+#define SCREENSAVER_HIGHSCORES_DELAY 70
 
+
+// Screensaver 'SpinLines' : baseline speed (will increase/decrease around this value)
+#define SCREENSAVER_SPINLINES_DELAY 50
+
+#define SCREENSAVER_SPINLINES_MAX_FRAME_DELAY 20
+// Delay will increase/decrease by this value every time we want to update it
+#define SCREENSAVER_SPINLINES_TICK_FACTOR 5
+
+
+// Number of rotations around the center before electing a new center
+// Coded on 4 bits, max allowed value=15
+#define SCREENSAVER_LASER_NB_TURNS_BEFORE_NEW_CENTER 5
+// Exclude edges if you think it's not visually nice. After tries, margin=0 is bad. =1 is ok (even with very small lines)
+#define SCREENSAVER_LASER_CENTER_MARGIN 1
+// Acceleration. Delay will be increased/decreased by this value every time we update it (once per turn)
+#define SCREENSAVER_LASER_TICK_FACTOR 6
+// Max delay between drawing 2 lines. The delay will go decreasing when reaching this value.
+#define SCREENSAVER_LASER_MAX_FRAME_DELAY 25
+
+
+// ----------------------------------------------------------
+// Animations & g_display
+// ----------------------------------------------------------
 
 // Duration of a fully lit screen when leveling-up
 #define LEVELUP_FLASH_DELAY 100
@@ -310,17 +342,12 @@ TODOs
 #define MODE_MALUS_LINES_OFF false
 
 
-// Screensavers management
-// -----------------------
-#define SCREENSAVER_MADFLY 0
-#define SCREENSAVER_SPIN 1
-#define SCREENSAVER_HIGH_SCORES 2
-
-
 // Display stuff
 // -------------
 #define PIXEL_OFF 0
 #define PIXEL_ON 1
+
+#define FONT_SIZE_1 1
 
 #define DECIMAL_POINT_ON true
 #define DECIMAL_POINT_OFF false
@@ -340,21 +367,28 @@ uint16_t g_nbLinesCompleted = 0;
 uint8_t g_level = 1;
 uint8_t g_konamiCodePosition = 0;
 
+// Screensavers management
+// -----------------------
+// ID of the current screensaver (see constants SCREENSAVER_ID_*)
 uint8_t g_selectedScreenSaver = 0;
-uint8_t g_screensaver_internal_state = 0;  // specific to each animation
-unsigned long g_screensaver_start_ts = 0;  // start TS of first or next screensaver
+
+// Buffer to store each animation's specific data. It's a shared variable to save SRAM memory.
+uint32_t g_screensaverInternalState = 0;
+
+// Timestamp of screensaver when waiting for a Start, or TS of NEXT screensaver when currently executing one
+unsigned long g_screensaverNextScreensaverStartTS = 0;
 
 bool g_modeNextBlock = MODE_NEXT_BLOCK_ON;
 bool g_modeMalusLines = MODE_MALUS_LINES_ON;
 Metro g_metroMalusLines = Metro(MODE_MALUS_LINES_INTERVAL);
-;
+
 
 unsigned long g_next_allowed_auto_down_ts = 0;
 uint16_t g_current_delay_between_auto_down = 500;  // reinit at game startup
 
 uint8_t g_nextBlockType = BLOCK_TYPE_NONE;
 uint8_t g_currentBlockType = BLOCK_TYPE_NONE;
-uint8_t g_blockRotation;
+uint8_t g_blockRotation = BLOCK_TYPE_I_POS_V;
 
 // Debouncers for buttons
 ADebouncer g_debouncerStart;
@@ -365,7 +399,6 @@ ADebouncer g_debouncerModeShowNext;
 
 // Debouncer for joystick is done by hand because we want consecutive actions to be done within the same 'LOW' (pushed) state
 unsigned long g_nextAllowedJoystickAutoRepeatActionTS = 0;
-
 
 bool g_block[PLAYABLE_COLS][PLAYABLE_ROWS + 2];  // 2 extra for rotation
 bool g_pile[PLAYABLE_COLS][PLAYABLE_ROWS];       // Row 0 = TOP
@@ -385,9 +418,9 @@ LedControl g_dispScore = LedControl(MAX7219_SCORE_PIN_DIN, MAX7219_SCORE_PIN_CLK
 
 bool g_interruptsEnabled = true;
 
-uint8_t g_matrix_refresh_iteration_count = 0;
+uint8_t g_interruptsSlowDownIterationCounter = 0;
 
-// Warning : there are also static variables in screen savers animations
+// WARNING : to compute MEMORY CONSUMPTION, there are also STATIC variables in screen savers animations
 
 
 // ===========================================================================================================
@@ -502,12 +535,12 @@ void initOutputMatrices(bool showWelcomeMessage) {
 
     g_matrix.setIntensity(MATRIX_INTENSITY);
 
-    g_matrix.drawChar(1, 1, 'T', PIXEL_ON, 0, 1);
-    g_matrix.drawChar(2, 8, 'e', PIXEL_ON, 0, 1);
-    g_matrix.drawChar(3, 16, 't', PIXEL_ON, 0, 1);
-    g_matrix.drawChar(8, 0, 'r', PIXEL_ON, 0, 1);
-    g_matrix.drawChar(9, 8, 'i', PIXEL_ON, 0, 1);
-    g_matrix.drawChar(10, 16, 's', PIXEL_ON, 0, 1);
+    g_matrix.drawChar(1, 1, 'T', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
+    g_matrix.drawChar(2, 8, 'e', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
+    g_matrix.drawChar(3, 16, 't', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
+    g_matrix.drawChar(8, 0, 'r', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
+    g_matrix.drawChar(9, 8, 'i', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
+    g_matrix.drawChar(10, 16, 's', PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
     g_matrix.write();
 
     delay(3000);
@@ -515,6 +548,7 @@ void initOutputMatrices(bool showWelcomeMessage) {
 
   g_matrix.setIntensity(MATRIX_INTENSITY);
   g_matrix.fillScreen(PIXEL_OFF);
+
   g_matrix.write();
 }
 
@@ -533,6 +567,9 @@ void setup() {
   delay(SETUP_INITIAL_PAUSE);
 
   Serial.begin(SERIAL_BAUD_SPEED);
+
+  // Always print (no #define) to investigate with a connected PC and no wired displays
+  Serial.print("Tetris...");
 
   pinMode(INPUT_PIN_BTN_START, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_ROTATE_RIGHT, INPUT_PULLUP);
@@ -562,16 +599,9 @@ void setup() {
 
   initOutputMatrices(true);
 
-  // TODO CLEAN
-  for (int i = 1; i <= 40; i++) {
-    adjustSpeedToLevel(i);
-    Serial.print(i);
-    Serial.print(":");
-    Serial.println(g_current_delay_between_auto_down);
-    Serial.print(", ");
-  }
-
   gotoGamePreparation();
+
+  Serial.println("OK");
 }
 
 
@@ -714,7 +744,7 @@ void gotoGamePreparation() {
   resetGridAndBuffers();
   updateLEDBuffer();
 
-  g_screensaver_start_ts = millis() + SCREENSAVER_DELAY_BEFORE;
+  g_screensaverNextScreensaverStartTS = millis() + SCREENSAVER_DELAY_BEFORE;
   setState(STATE_GAME_WAIT_START);
 
   sayStart();
@@ -738,11 +768,58 @@ void gotoScreenSaver() {
   g_matrix.write();
 
   // Trigger timestamp of the change to next screensaver
-  g_screensaver_start_ts = millis() + SCREENSAVER_DURATION;
+  g_screensaverNextScreensaverStartTS = millis() + SCREENSAVER_DURATION;
 
   // Select a random screen saver
-  g_selectedScreenSaver = random(0, 3);
-  g_screensaver_internal_state = 0;
+  g_selectedScreenSaver = random(0, SCREENSAVER_MAX_ID + 1);
+
+  // Initialize shared buffer depending on screensaver type.
+  // ----------------------------------------------------
+  if (g_selectedScreenSaver == SCREENSAVER_ID_MADFLY) {
+    // ----------------------------------------------------
+
+    // Put the 'fly' pixel at the center of the screen
+    // g_screensaverInternalState bits : .... .... | .... ....  | ...X XXXX | ...Y YYYY
+    uint8_t x = random(0, g_matrix.width());
+    uint8_t y = random(0, g_matrix.height());
+    g_screensaverInternalState = ((uint32_t)x << 8) + (y);
+
+  }
+  // ----------------------------------------------------
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_LASER) {
+    // ----------------------------------------------------
+
+    g_screensaverInternalState = 0;
+
+    uint8_t startingTicks = 5;
+    uint8_t isIncreasingTicks = 1;
+    uint8_t rotationCenterX = random(SCREENSAVER_LASER_CENTER_MARGIN, g_matrix.width() - SCREENSAVER_LASER_CENTER_MARGIN);
+    uint8_t rotationCenterY = random(SCREENSAVER_LASER_CENTER_MARGIN, g_matrix.height() - SCREENSAVER_LASER_CENTER_MARGIN);
+
+    // g_screensaverInternalState bits : ..ST TTTT | EE.M MMMM | ...X XXXX | ...Y YYYY |
+    g_screensaverInternalState = ((uint32_t)isIncreasingTicks << 29) + ((uint32_t)startingTicks << 24) + ((uint32_t)rotationCenterX << 5) + rotationCenterY;
+
+  }
+  // ----------------------------------------------------
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_HIGH_SCORES) {
+    // ----------------------------------------------------
+
+    // g_screensaverInternalState bits : .... .... NMii iiii
+    g_screensaverInternalState = 0;
+  }
+  // ----------------------------------------------------
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_SPIN_LINES) {
+    // ----------------------------------------------------
+    uint8_t positionOnCurrentAxis = 12;
+    uint8_t isMovingOnXAxis = 0;
+    uint8_t waitMsec = 15;
+    uint8_t isIncreasingTicks = 1;
+    g_screensaverInternalState = ((uint32_t)isIncreasingTicks << 24) + ((uint32_t)waitMsec << 16) + ((uint32_t)isMovingOnXAxis << 8) + positionOnCurrentAxis;
+  }
+  // ----------------------------------------------------
+  else {
+    g_screensaverInternalState = 0;
+  }
 
   setState(STATE_SCREENSAVER);
 }
@@ -853,6 +930,18 @@ void incLevel() {
 // level <= DOWN_SPEED_LEVEL_LIMIT_1 :  speed = DOWN_SPEED_BASE_1 - (level - 1) * DOWN_SPEED_INCR_1                          : [ 1:500 ; 2:455 ; ... ; 9:140 ]
 //       <= DOWN_SPEED_LEVEL_LIMIT_2          = DOWN_SPEED_BASE_2 - (level - DOWN_SPEED_LEVEL_LIMIT_1) * DOWN_SPEED_INCR_2   : [ 10:130, 11:120, 12:110, 13:100, 14:90]
 //        > DOWN_SPEED_LEVEL_LIMIT_2 :        = DOWN_SPEED_BASE_3 - (level - DOWN_SPEED_LEVEL_LIMIT_2) * DOWN_SPEED_INCR_3   : [ 15:85, 16:80, ...]
+// 1:500, 2:455, 3:410, 4:365, 5:320, 6:275, 7:230, 8:185, 9:140, 10:130, 11:120, 12:110, 13:100, 14:90, 15:85, 16:80, 17:75, 18:70, 19:65, 20:60, 21:55, 22:50, 23:45, 24:40, 25:35, 26:30, 27:25, 28:20, --- stopped at 20.  29:15, 30:10, 31:5, 32:0, 33:65531, 34:65526, 35:65521, 36:65516, 37:65511, 38:65506, 39:65501, 40:65496,
+
+// To check values:
+//   Serial.println("Showing level speeds:");
+//   for (int i = 1; i <= 40; i++) {
+//     adjustSpeedToLevel(i);
+//     Serial.print(i);
+//     Serial.print(":");
+//     Serial.print(g_current_delay_between_auto_down);
+//     Serial.print(", ");
+//   }
+//   Serial.println("");
 
 void adjustSpeedToLevel(byte level) {
   if (level <= DOWN_SPEED_LEVEL_LIMIT_1) {
@@ -862,6 +951,7 @@ void adjustSpeedToLevel(byte level) {
   } else {
     g_current_delay_between_auto_down = DOWN_SPEED_BASE_3 - (level - DOWN_SPEED_LEVEL_LIMIT_2) * DOWN_SPEED_INCR_3;
   }
+  if (g_current_delay_between_auto_down < 20) g_current_delay_between_auto_down = 20;
 
 #ifdef FLAG_DEV_ENABLE_LOGS
   Serial.print("New speed: ");
@@ -933,7 +1023,7 @@ void loop() {
   // - update modes
   // - update konami code with joystick
   else if (g_gameState == STATE_GAME_WAIT_START) {
-    if (millis() > g_screensaver_start_ts) {
+    if (millis() > g_screensaverNextScreensaverStartTS) {
       gotoScreenSaver();
     }
 
@@ -972,171 +1062,337 @@ void loop() {
       gotoGamePreparation();
     }
     // Change screensaver
-    else if (millis() > g_screensaver_start_ts) {
+    else if (millis() > g_screensaverNextScreensaverStartTS) {
       initOutputMatrices(false);
       gotoScreenSaver();
     }
     // Continue screensaver
     else {
-      continueScreenSaver();
+      screensaverLoop();
     }
   }
 }
 
 
-// ===========================================================================================================
-void continueScreenSaver() {
-  if (g_selectedScreenSaver == SCREENSAVER_MADFLY) continueScreenSaver_MadFly();
-  else if (g_selectedScreenSaver == SCREENSAVER_SPIN) continueScreenSaver_Spin();
-  else if (g_selectedScreenSaver == SCREENSAVER_HIGH_SCORES) continueScreenSaver_HighScores();
+uint8_t firstByte(uint32_t input) {
+  return (input & 0xFF);
+}
+uint8_t secondByte(uint32_t input) {
+  return (input & 0xFF00) >> 8;
+}
+uint8_t thirdByte(uint32_t input) {
+  return (input & 0xFF0000) >> 16;
+}
+uint8_t fourthByte(uint32_t input) {
+  return (input & 0xFF000000) >> 24;
 }
 
 // ===========================================================================================================
-void continueScreenSaver_MadFly() {
-  static byte x = g_matrix.width() / 2;
-  static byte y = g_matrix.height() / 2;
-  static byte xNext, yNext;
+void screensaverLoop() {
+  if (g_selectedScreenSaver == SCREENSAVER_ID_MADFLY) screensaverLoop_MADFLY();
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_HIGH_SCORES) screensaverLoop_HIGHSCORES();
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_LASER) screensaverLoop_LASER();
+  else if (g_selectedScreenSaver == SCREENSAVER_ID_SPIN_LINES) screensaverLoop_SPINLINES();
+}
 
+// ===========================================================================================================
+void screensaverLoop_MADFLY() {
+  // Load state
+  // ----------
+  // g_screensaverInternalState bits : .... .... | .... .... | ...X XXXX | ...Y YYYY |
+  uint8_t x = secondByte(g_screensaverInternalState);
+  uint8_t y = firstByte(g_screensaverInternalState);
+
+
+  // Process iteration
+  // -----------------
+  // Draw the fly
   g_matrix.drawPixel(x, y, PIXEL_ON);
   g_matrix.write();
-  delay(SCREENSAVER_FLY_SPEED);
 
+  // Retina persistence
+  delay(SCREENSAVER_MADFLY_DELAY);
+
+  // Erase the fly
   g_matrix.drawPixel(x, y, PIXEL_OFF);  // Erase the old position of our dot
 
+
+  // Prepare next iteration
+  // ----------------------
+  // Compute its next position
+  uint8_t xNext = x;
+  uint8_t yNext = y;
   do {
     switch (random(4)) {
       case 0:
         xNext = constrain(x + 1, 0, g_matrix.width() - 1);
-        yNext = y;
         break;
       case 1:
         xNext = constrain(x - 1, 0, g_matrix.width() - 1);
-        yNext = y;
         break;
       case 2:
         yNext = constrain(y + 1, 0, g_matrix.height() - 1);
-        xNext = x;
         break;
       case 3:
         yNext = constrain(y - 1, 0, g_matrix.height() - 1);
-        xNext = x;
         break;
     }
-  } while (x == xNext && y == yNext);  // Repeat until we find a new coordinate
+  } while (x == xNext && y == yNext);  // Repeat until we find a different coordinate
 
-  x = xNext;
-  y = yNext;
+  // Write state (the next position of the pixel) for next loop
+  // ------------
+  g_screensaverInternalState = ((uint32_t)xNext << 8) + (yNext);
 }
 
 // ===========================================================================================================
-void continueScreenSaver_Spin() {
-  // Based on code from example 'Spin' splitted in steps to allow user's interaction to stop screensaver
-  //
-  // g_screensaver_internal_state bits : PXVV VVVV
-  // P : on pause or g_displaying a new line
-  // X : iterating on X axis or Y
-  // V : coordinate value (starting point of the line) on the current axis
 
-  static byte wait_msec = 50;
-  static int inc = -2;
+// Moving a half line from a random rotation point R in the grid.
+// For nicer visual effect, R is not on the edges nor the right against an edge.
+// 2 independant rules :
+// - after a given amount of full rotations (turns), a new center is elected
+// - after one turn, we increase/decrease the speed of rotation (the delay when displaying a line)
+void screensaverLoop_LASER() {
 
-  bool isOnPause = bitRead(g_screensaver_internal_state, 7);
-  bool isMovingOnXAxis = bitRead(g_screensaver_internal_state, 6);
-  byte axisPosition = g_screensaver_internal_state & 0x3F;
+  // Load state
+  // ----------
+  // g_screensaverInternalState bits : ..ST TTTT | EE.M MMMM | NNNN ..XX | XXXY YYYY |
+  // EE: id of current edge ; 00=X to the right, 01=Y to the bottom, 10=X to the left, 11=Y to the top
+  // MMMMM : coordinate of the moving point on the current edge, [0-15] or [0-23] ie 5 bits
+  // NNN : id of current full rotation. When reaching 7, we change the rotation center
+  // XXXXX YYYYY : x/y of rotation center
+  // XXXXX is in [2-13] ie 5 bits (a translation does not save a bit) ; Y is in [2-21] : 5 bits
+  // TTTT : number of 'ticks' (1 tick = some ms) in the delay()
+  // S: sign of next tick (++ or --)
 
-  if (isOnPause) {
-    delay(wait_msec);
+  uint8_t rotationCenterY = firstByte(g_screensaverInternalState) & 0x1F;
+  uint8_t rotationCenterX = (g_screensaverInternalState >> 5) & 0x1F;
+  uint8_t currentTurnIdx = secondByte(g_screensaverInternalState) >> 4;
+  uint8_t movingEdgeId = thirdByte(g_screensaverInternalState) >> 6;
+  uint8_t positionOnCurrentEdge = thirdByte(g_screensaverInternalState) & 0x1F;
+  uint8_t sleepTicks = fourthByte(g_screensaverInternalState) & 0x1F;
+  uint8_t isIncreasingTicks = (fourthByte(g_screensaverInternalState) >> 5) & 0x01;
 
-    // Preparing next loop iteration : moving along axis
-    axisPosition++;
+  //   Serial.print("LASER state:");
+  //   Serial.print(g_screensaverInternalState);
+  //   Serial.print(" | rot=");
+  //   Serial.print(rotationCenterX);
+  //   Serial.print(":");
+  //   Serial.print(rotationCenterY);
+  //   Serial.print(", turn=");
+  //   Serial.print(currentTurnIdx);
+  //   Serial.print(", edge=");
+  //   Serial.print(movingEdgeId);
+  //   Serial.print(", pos=");
+  //   Serial.print(positionOnCurrentEdge);
+  //   Serial.print(", ticks=");
+  //   Serial.print(sleepTicks);
+  //   Serial.print(", isInc=");
+  //   Serial.println(isIncreasingTicks);
 
-    if (isMovingOnXAxis) {
-      if (axisPosition >= g_matrix.width()) {
-        axisPosition = 0;
-        isMovingOnXAxis = false;
 
-        wait_msec = wait_msec + inc;
-        if (wait_msec == 0) inc = 2;
-        if (wait_msec == 50) inc = -2;
-      }
-    } else {
-      if (axisPosition >= g_matrix.height()) {
-        axisPosition = 0;
-        isMovingOnXAxis = true;
+  // Process iteration
+  // (and prepare next one)
+  // -----------------
+  delay(sleepTicks * SCREENSAVER_LASER_TICK_FACTOR);
+
+  g_matrix.fillScreen(LOW);
+  if (movingEdgeId == 0) {
+    g_matrix.drawLine(rotationCenterX, rotationCenterY, positionOnCurrentEdge, 0, PIXEL_ON);
+    positionOnCurrentEdge++;
+    if (positionOnCurrentEdge >= g_matrix.width()) {
+      positionOnCurrentEdge = 0;
+      movingEdgeId = 1;
+
+      // Update tick when we reach this end of X position only
+      // Careful to not go below 0, sleepTicks is unsigned !, so we check first if current value is 0 (or 1, 0 means no delay) before decrementing.
+      if (isIncreasingTicks == 0 && sleepTicks == 1) {
+        isIncreasingTicks = 1;
+      } else if (isIncreasingTicks == 1 && sleepTicks * SCREENSAVER_LASER_TICK_FACTOR >= SCREENSAVER_LASER_MAX_FRAME_DELAY) {
+        isIncreasingTicks = 0;
+      } else {
+        sleepTicks = sleepTicks + (isIncreasingTicks == 1 ? 1 : -1);
       }
     }
+  } else if (movingEdgeId == 1) {
+    g_matrix.drawLine(rotationCenterX, rotationCenterY, g_matrix.width() - 1, positionOnCurrentEdge, PIXEL_ON);
+    positionOnCurrentEdge++;
+    if (positionOnCurrentEdge >= g_matrix.height()) {
+      positionOnCurrentEdge = g_matrix.width() - 1;
+      movingEdgeId = 2;
+    }
+  } else if (movingEdgeId == 2) {
+    g_matrix.drawLine(rotationCenterX, rotationCenterY, positionOnCurrentEdge, g_matrix.height() - 1, PIXEL_ON);
+    // Careful to not go below 0, positionOnCurrentEdge is unsigned !, so we check first if current value is 0 before decrementing.
+    if (positionOnCurrentEdge == 0) {
+      positionOnCurrentEdge = g_matrix.height() - 1;
+      movingEdgeId = 3;
+    } else {
+      positionOnCurrentEdge--;
+    }
 
-    g_screensaver_internal_state = axisPosition + isMovingOnXAxis * bit(6);
   } else {
-    g_matrix.fillScreen(LOW);
-    if (isMovingOnXAxis) {
-      g_matrix.drawLine(axisPosition, 0, g_matrix.width() - 1 - axisPosition, g_matrix.height() - 1, HIGH);
+    g_matrix.drawLine(rotationCenterX, rotationCenterY, 0, positionOnCurrentEdge, PIXEL_ON);
+    positionOnCurrentEdge--;
+    // Careful to not go below 0, positionOnCurrentEdge is unsigned !, so we check first if current value is 0 before decrementing.
+    if (positionOnCurrentEdge == 0) {
+      positionOnCurrentEdge = 0;
+      movingEdgeId = 0;
+      currentTurnIdx++;
+      if (currentTurnIdx == SCREENSAVER_LASER_NB_TURNS_BEFORE_NEW_CENTER) {
+        currentTurnIdx = 0;
+        rotationCenterX = random(SCREENSAVER_LASER_CENTER_MARGIN, g_matrix.width() - SCREENSAVER_LASER_CENTER_MARGIN);
+        rotationCenterY = random(SCREENSAVER_LASER_CENTER_MARGIN, g_matrix.height() - SCREENSAVER_LASER_CENTER_MARGIN);
+      }
     } else {
-      g_matrix.drawLine(g_matrix.width() - 1, axisPosition, 0, g_matrix.height() - 1 - axisPosition, HIGH);
+      positionOnCurrentEdge--;
     }
-    g_matrix.write();
-
-    // Preparing next loop iteration : going into sleep
-    bitSet(g_screensaver_internal_state, 7);
   }
+  g_matrix.write();
+
+
+  // Preparing next loop iteration
+  // -------------------------
+  // Already done
+
+  // Write state for next loop
+  // -------------------------
+  // g_screensaverInternalState bits : ..ST TTTT | EE.M MMMM | NNNN ..XX | XXXY YYYY |
+  g_screensaverInternalState = ((uint32_t)isIncreasingTicks << 29) + ((uint32_t)sleepTicks << 24) + ((uint32_t)movingEdgeId << 22) + ((uint32_t)positionOnCurrentEdge << 16) + ((uint32_t)currentTurnIdx << 12) + ((uint32_t)rotationCenterX << 5) + rotationCenterY;
+}
+
+// Based on code from example 'Spin' split in steps to allow user's interaction to stop screensaver
+void screensaverLoop_SPINLINES() {
+
+  // Load state
+  // ----------
+  // g_screensaverInternalState bits : | .... ...S | WWWW WWWW | .... ...X | ...M MMMM |
+  // S : sign of next delay increment (++ or --)
+  // W : current delay in msec
+  // X : 1='moving along the X axis', 0='on Y axis'
+  // M : coordinate value (starting point of the line) on the current axis
+
+  uint8_t positionOnCurrentAxis = firstByte(g_screensaverInternalState);
+  uint8_t isMovingOnXAxis = secondByte(g_screensaverInternalState);
+  uint8_t waitMsec = thirdByte(g_screensaverInternalState);
+  uint8_t isIncreasingTicks = fourthByte(g_screensaverInternalState);
+
+  // Process iteration
+  // -----------------
+  g_matrix.fillScreen(LOW);
+  if (isMovingOnXAxis) {
+    g_matrix.drawLine(positionOnCurrentAxis, 0, g_matrix.width() - 1 - positionOnCurrentAxis, g_matrix.height() - 1, HIGH);
+  } else {
+    g_matrix.drawLine(g_matrix.width() - 1, positionOnCurrentAxis, 0, g_matrix.height() - 1 - positionOnCurrentAxis, HIGH);
+  }
+  g_matrix.write();
+
+  delay(waitMsec);
+
+
+  // Prepare next iteration
+  // ----------------------
+  positionOnCurrentAxis++;
+
+  if (isMovingOnXAxis) {
+    if (positionOnCurrentAxis >= g_matrix.width()) {
+      positionOnCurrentAxis = 0;
+      isMovingOnXAxis = false;
+
+      // Every time we reach a corner on X-axis, we increase delay (reduce speed) then decrease it.
+      // Careful to not go below 0, isIncreasingTicks is unsigned !, so we check first if current value is below a threshold before decrementing.
+      if (isIncreasingTicks) {
+        if (waitMsec >= SCREENSAVER_SPINLINES_MAX_FRAME_DELAY) isIncreasingTicks = 0;
+        else waitMsec += SCREENSAVER_SPINLINES_TICK_FACTOR;
+
+      } else {
+        if (waitMsec <= SCREENSAVER_SPINLINES_TICK_FACTOR) isIncreasingTicks = 1;
+        else waitMsec -= SCREENSAVER_SPINLINES_TICK_FACTOR;
+      }
+    }
+  } else {
+    if (positionOnCurrentAxis >= g_matrix.height()) {
+      positionOnCurrentAxis = 0;
+      isMovingOnXAxis = true;
+    }
+  }
+
+
+  // Write state for next loop
+  // -------------------------
+  // g_screensaverInternalState bits : | .... ...S | WWWW WWWW | .... ...X | ...M MMMM |
+  g_screensaverInternalState = ((uint32_t)isIncreasingTicks << 24) + ((uint32_t)waitMsec << 16) + ((uint32_t)isMovingOnXAxis << 8) + positionOnCurrentAxis;
 }
 
 // ===========================================================================================================
-void continueScreenSaver_HighScores() {
-  // g_screensaver_internal_state bits : NM.. iiii
+
+void screensaverLoop_HIGHSCORES() {
+  const uint8_t spacerWidth = 1;                            // pixels between 2 chars
+  const uint8_t singleCharAndSpaceWidth = 5 + spacerWidth;  // The font width is 5 pixels per digit.
+
+
+  // Load state
+  // ----------
+  // g_screensaverInternalState bits : .... .... NMii iiii
   // N : NextBlock mode enabled
   // M : MalusLines mode enabled
   // i : index of loop on pixels
-  bool showScoreForNextBlockEnabled = bitRead(g_screensaver_internal_state, 7);
-  bool showScoreForMalusLinesEnabled = bitRead(g_screensaver_internal_state, 6);
-  byte i = g_screensaver_internal_state & 0x3F;
+  bool showScoreForNextBlockEnabled = bitRead(g_screensaverInternalState, 7);
+  bool showScoreForMalusLinesEnabled = bitRead(g_screensaverInternalState, 6);
+  uint8_t i = g_screensaverInternalState & 0x3F;
 
+  // Convert numerical score to string
   String tape = String(g_highScores[showScoreForNextBlockEnabled][showScoreForMalusLinesEnabled]);
 
-  byte spacer = 1;
-  byte width = 5 + spacer;  // The font width is 5 pixels per digit.
+
+  // Process iteration
+  // -----------------
 
   // Loop on all the pixels needed to g_display the message
-  //for ( int i = 0 ; i < width * tape.length() + g_matrix.width() - 1 - spacer; i++ ) {
+  //for ( int i = 0 ; i < singleCharAndSpaceWidth * tape.length() + g_matrix.width() - 1 - spacerWidth; i++ ) {
   {
-    g_matrix.fillScreen(LOW);
-    g_matrix.drawRect(0, 0, 8, 6, 1);
-    g_matrix.drawRect(8, 0, 8, 6, 1);
-    g_matrix.drawRect(3, 6, 2, 2, 1);
-    g_matrix.drawRect(11, 6, 2, 2, 1);
+    g_matrix.fillScreen(PIXEL_OFF);
+
+    // Zones for the 2 modes "icons"
+    // -----------------------------
+    g_matrix.drawRect(0, 0, 8, 6, PIXEL_ON);
+    g_matrix.drawRect(8, 0, 8, 6, PIXEL_ON);
+    g_matrix.drawRect(3, 6, 2, 2, PIXEL_ON);
+    g_matrix.drawRect(11, 6, 2, 2, PIXEL_ON);
     byte y0 = 3;
     if (showScoreForNextBlockEnabled) {
-      byte x0 = 3;
-      g_matrix.drawLine(x0 + 0, y0, x0 + 2, y0, 1);
-      g_matrix.drawPixel(x0 + 1, y0 - 1, 1);
+      byte x0 = 3;                                          // Draws this shape:
+      g_matrix.drawPixel(x0 + 1, y0 - 1, PIXEL_ON);         // .X.
+      g_matrix.drawLine(x0 + 0, y0, x0 + 2, y0, PIXEL_ON);  // XXX
     }
     if (showScoreForMalusLinesEnabled) {
       byte x0 = 10;
-      g_matrix.drawPixel(x0, y0, 1);
-      g_matrix.drawPixel(x0 + 2, y0, 1);
-      g_matrix.drawPixel(x0 + 3, y0, 1);
+      g_matrix.drawPixel(x0, y0, PIXEL_ON);  // Draws "X.XX"
+      g_matrix.drawPixel(x0 + 2, y0, PIXEL_ON);
+      g_matrix.drawPixel(x0 + 3, y0, PIXEL_ON);
     }
 
-    byte letter = i / width;
-    short x = (g_matrix.width() - 1) - i % width;  // Must be a signed type for >= 0 comparison
-    while (x + width - spacer >= 0 && letter >= 0) {
-      if (letter < tape.length()) {
-        g_matrix.drawChar(x + 1, 12, tape[letter], HIGH, LOW, 1);
+    // Zone for score value
+    // --------------------
+    uint8_t letterIdx = i / singleCharAndSpaceWidth;
+    short x = (g_matrix.width() - 1) - i % singleCharAndSpaceWidth;  // Must be a signed type for >= 0 comparison
+    while (x + singleCharAndSpaceWidth - spacerWidth >= 0 && letterIdx >= 0) {
+      if (letterIdx < tape.length()) {
+        g_matrix.drawChar(x + 1, 12, tape[letterIdx], PIXEL_ON, PIXEL_OFF, FONT_SIZE_1);
       }
 
-      letter--;
-      x -= width;
+      letterIdx--;
+      x -= singleCharAndSpaceWidth;
     }
 
-    // Outer box (done after letters to rewrite on top of letters on left & right sides)
+    // Zone for score box (done after letters to rewrite on top of letters on left & right sides)
+    // ------------------
     g_matrix.drawRect(0, 8, 16, 16, 1);
-    g_matrix.write();  // Send bitmap to g_display
+    g_matrix.write();
 
-    delay(SCREENSAVER_HIGHSCORES_SPEED);
+    delay(SCREENSAVER_HIGHSCORES_DELAY);
 
-    // Push back internal state
     i++;
-    if (i == width * tape.length() + g_matrix.width() - 1 - spacer - 2) {  // -2 because of external box using 2 pixels
+    if (i == singleCharAndSpaceWidth * tape.length() + g_matrix.width() - 1 - spacerWidth - 2) {  // -2 because of external box using 2 pixels
       // Reset pixel
       i = 0;
       // Update modes
@@ -1152,9 +1408,11 @@ void continueScreenSaver_HighScores() {
       }
     }
 
-    g_screensaver_internal_state = i;
-    bitWrite(g_screensaver_internal_state, 7, showScoreForNextBlockEnabled);
-    bitWrite(g_screensaver_internal_state, 6, showScoreForMalusLinesEnabled);
+    // Write state for next loop
+    // -------------------------
+    g_screensaverInternalState = i;
+    bitWrite(g_screensaverInternalState, 7, showScoreForNextBlockEnabled);
+    bitWrite(g_screensaverInternalState, 6, showScoreForMalusLinesEnabled);
   }
 }
 
@@ -2274,22 +2532,23 @@ boolean has3SpacesOnRight() {
 
 // ===========================================================================================================
 
+// Interruption code :
+// - STATE_GAME_RUNNING : display score
+// - STATE_GAME_RUNNING + STATE_GAME_WAIT_START : display matrices
 ISR(TIMER1_COMPA_vect) {  //change the 0 to 1 for timer1 and 2 for timer2
   if (!g_interruptsEnabled) return;
 
-  if (g_matrix_refresh_iteration_count == 0) {
+  g_interruptsSlowDownIterationCounter++;
+  if (g_interruptsSlowDownIterationCounter > MATRIX_REFRESH_RATE_REDUCE_FACTOR) {
+    g_interruptsSlowDownIterationCounter = 0;
+
     // Uncomment to have the grid on Serial. Usefull when no electronic ready
-    //showPlayableZoneOnSerial();
+    //showPlayableAreaOnSerial();
 
     if (g_gameState == STATE_GAME_RUNNING) {
-      dispRefreshScore();
+      displayScoreAndLevel();
     }
     dispRefreshMatrix();
-  }
-
-  g_matrix_refresh_iteration_count++;
-  if (g_matrix_refresh_iteration_count > MATRIX_REFRESH_RATE_REDUCE_FACTOR) {
-    g_matrix_refresh_iteration_count = 0;
   }
 }
 
@@ -2303,8 +2562,8 @@ void updateLEDBuffer() {
 }
 
 // ===========================================================================================================
-void showPlayableZoneOnSerial() {
 #ifdef FLAG_DEV_ENABLE_LOGS
+void showPlayableAreaOnSerial() {
   Serial.print("===== LVL:");
   Serial.print(g_level);
   Serial.print(" SPD:");
@@ -2318,8 +2577,8 @@ void showPlayableZoneOnSerial() {
     }
     Serial.println("");
   }
-#endif
 }
+#endif
 
 // ===========================================================================================================
 void resetScore() {
@@ -2340,12 +2599,16 @@ void scoreOneLineCompleted(byte nbLinesCompletedInSequence) {
 
 // ===========================================================================================================
 void animationLevelUp() {
+  digitalWrite(OUTPUT_PIN_BACKLIGHT, HIGH);
+
   for (byte y = 0; y < PLAYABLE_ROWS; y++) {
     for (byte x = 0; x < PLAYABLE_COLS; x++) {
       g_disp[x][y] = 1;
     }
   }
   delay(LEVELUP_FLASH_DELAY);
+
+  digitalWrite(OUTPUT_PIN_BACKLIGHT, LOW);
 
   // Restore normal grid content
   updateLEDBuffer();
@@ -2362,16 +2625,22 @@ unsigned short getScore() {
 }
 
 // ===========================================================================================================
-void dispRefreshScore() {
+
+// Update the whole 8 '7-digits-segments' with score and level
+void displayScoreAndLevel() {
   g_matrix.fillScreen(PIXEL_OFF);
 
-  unsigned int score = getScore();  // keep 'int' type for last modulo
-
-  // Level on the left of the "8 7-segments digits g_display"
+  // Level
+  // -----
+  // on the left of the "8 7-segments digits g_display"
   g_dispScore.setDigit(MAX7219_SCORE_ID, 6, g_level % 10, DECIMAL_POINT_OFF);
   g_dispScore.setDigit(MAX7219_SCORE_ID, 7, g_level / 10, DECIMAL_POINT_OFF);
 
-  // Score with digits on the right of the "8 7-segments digits g_display"
+  // Score
+  // -----
+  // with digits on the right of the "8 7-segments digits g_display"
+  uint16_t score = getScore();
+
   g_dispScore.setDigit(MAX7219_SCORE_ID, 0, score % 10, DECIMAL_POINT_OFF);
   if (score >= 10) {
     g_dispScore.setDigit(MAX7219_SCORE_ID, 1, (score % 100) / 10, DECIMAL_POINT_OFF);
@@ -2388,6 +2657,11 @@ void dispRefreshScore() {
 }
 
 
+// Update the whole 6 8x8 matrix with
+// - frame
+// - modes icons
+// - binary score widget
+// - grid with bottom+falling blocks
 void dispRefreshMatrix() {
   g_matrix.fillScreen(PIXEL_OFF);
 
