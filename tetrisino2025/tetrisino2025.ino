@@ -21,7 +21,6 @@ TESTS
 
 TODOs
 - scroller le '...' en mode screensaver
-- Dès que high score : afficher "H" dans la colonne de droite
 - In case of SRAM memory issue ? Merge g_block & g_pile & g_disp into a single array of uint8_t
 */
 
@@ -29,6 +28,13 @@ TODOs
 // ===========================================================================================================
 // LIBRARIES
 // ===========================================================================================================
+
+//  DOIT ESP32 DEVKIT V1.
+// https://github.com/espressif/arduino-esp32/issues/508
+// #include <pgmspace.h>
+// then many other issues to solve with pin names & interrupts :(
+
+
 
 // Save and load best scores
 #include <EEPROM.h>
@@ -472,7 +478,7 @@ void setState(byte newState) {
 // Define matrixes position
 // Usefull to do it not only at setup() time but also at each new game due to the fact that wires have a
 // tendency to micro cuts , thus reseting matrixes (otherwise until next power up).
-void initOutputMatrices(bool showWelcomeMessage) {
+void resetupDisplayMatrix(bool isInitialSetup) {
 #ifdef FLAG_DEV_ENABLE_LOGS
   Serial.println("Matrices: initialization");
 #endif
@@ -509,13 +515,14 @@ void initOutputMatrices(bool showWelcomeMessage) {
 
 
   // Show that all matrixes are OK - to be used when installing and testing matrixes on the station at build time only
-  if (showWelcomeMessage) {
+  if (isInitialSetup) {
     // A lower intensity since all 6 8x8 are lit, consuming current
     g_matrix.setIntensity(1);
 
     for (int i = 0; i < 3; i++) {
       g_matrix.fillScreen(PIXEL_ON);
       g_matrix.write();
+      // Backlight is lit at the opposite of the matrix to not use all the current at the same time
       digitalWrite(OUTPUT_PIN_BACKLIGHT, LOW);
       delay(250);
 
@@ -553,14 +560,19 @@ void initOutputMatrices(bool showWelcomeMessage) {
 }
 
 
-void setupDisplayScore() {
+void resetupDisplayScore(bool isInitialSetup) {
+  // Force a reconnection to device in case of issue
+  g_dispScore = LedControl(MAX7219_SCORE_PIN_DIN, MAX7219_SCORE_PIN_CLK, MAX7219_SCORE_PIN_CS, 1);
+
   // No power save mode
   g_dispScore.shutdown(MAX7219_SCORE_ID, false);
 
   g_dispScore.setIntensity(MAX7219_SCORE_ID, DISP_SCORE_INTENSITY);
 
-  // Show digits are OK
-  sayHello();
+  if (isInitialSetup) {
+    // Show digits are OK
+    sayHello();
+  }
 }
 
 void setup() {
@@ -569,7 +581,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD_SPEED);
 
   // Always print (no #define) to investigate with a connected PC and no wired displays
-  Serial.print("Tetris...");
+  Serial.println("Tetris...");
 
   pinMode(INPUT_PIN_BTN_START, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_ROTATE_RIGHT, INPUT_PULLUP);
@@ -580,6 +592,7 @@ void setup() {
   pinMode(INPUT_PIN_JOY_DROP, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_MODE_NEXT_PIECE, INPUT_PULLUP);
   pinMode(INPUT_PIN_BTN_MODE_MALUS_LINES, INPUT_PULLUP);
+  pinMode(OUTPUT_PIN_BACKLIGHT, OUTPUT);
 
   g_debouncerStart.mode(debounce_t::DELAYED, START_BUTTON_DEBOUNCE, HIGH);         // HIGH because INPUT_PULLUP
   g_debouncerRotateLeft.mode(debounce_t::DELAYED, ROTATE_BUTTON_DEBOUNCE, HIGH);   // HIGH because INPUT_PULLUP
@@ -587,17 +600,14 @@ void setup() {
   g_debouncerModeShowNext.mode(debounce_t::DELAYED, MODE_BUTTON_DEBOUNCE, HIGH);   // HIGH because INPUT_PULLUP
   g_debouncerModeMalus.mode(debounce_t::DELAYED, MODE_BUTTON_DEBOUNCE, HIGH);      // HIGH because INPUT_PULLUP
 
-
-  pinMode(OUTPUT_PIN_BACKLIGHT, OUTPUT);
-
   // Do not initialize piezo pin here, it generates background noise
   //pinMode(OUTPUT_PIN_PWM_PIEZO, OUTPUT);
 
-  setupDisplayScore();
-
   loadHighScores();
 
-  initOutputMatrices(true);
+  resetupDisplayScore(true);
+
+  resetupDisplayMatrix(true);
 
   gotoGamePreparation();
 
@@ -606,7 +616,9 @@ void setup() {
 
 
 void loadHighScores() {
-  // uint16_t g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
+  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
+  // g_highScores[g_modeNextBlock][g_modeMalusLines]
+  // uint16_t g_highScores[2][2] = { { 0, 0 }, { 0, 0 } };
 
 #ifdef FLAG_RESET_HIGH_SCORES_AT_BOOT
   // Overrides EPROM with following values
@@ -630,13 +642,15 @@ void loadHighScores() {
 
 #endif
 
-#ifdef FLAG_DEV_ENABLE_LOGS
+  //#ifdef FLAG_DEV_ENABLE_LOGS
+  // [MODE_NEXT_BLOCK_ON?][MODE_MALUS_LINES_ON?]
+  // 2025-09-06 : 1619 2829 10929 2688
   Serial.println("High scores:");
   Serial.println(g_highScores[0][0]);
   Serial.println(g_highScores[0][1]);
   Serial.println(g_highScores[1][0]);
   Serial.println(g_highScores[1][1]);
-#endif
+  //#endif
 }
 
 
@@ -862,7 +876,8 @@ void gotoGameStart() {
 
   initializeRandomGenerator();
 
-  initOutputMatrices(false);
+  resetupDisplayScore(false);
+  resetupDisplayMatrix(false);
 
   g_dispScore.clearDisplay(MAX7219_SCORE_ID);
   g_matrix.fillScreen(PIXEL_OFF);
@@ -1058,12 +1073,14 @@ void loop() {
   else if (g_gameState == STATE_SCREENSAVER) {
     // Exit screensaver
     if (readAction() != ACTION_NONE) {
-      initOutputMatrices(false);
+      resetupDisplayScore(false);
+      resetupDisplayMatrix(false);
       gotoGamePreparation();
     }
     // Change screensaver
     else if (millis() > g_screensaverNextScreensaverStartTS) {
-      initOutputMatrices(false);
+      resetupDisplayScore(false);
+      resetupDisplayMatrix(false);
       gotoScreenSaver();
     }
     // Continue screensaver
@@ -2615,20 +2632,32 @@ void animationLevelUp() {
 }
 
 // ===========================================================================================================
-void incScore(unsigned short inc) {
+void incScore(uint16_t inc) {
   g_score += inc;
 }
 
 // ===========================================================================================================
-unsigned short getScore() {
+uint16_t getScore() {
   return g_score;
+}
+
+bool isHighScoreBeaten() {
+  //return true;
+  return g_score > g_highScores[g_modeNextBlock][g_modeMalusLines];
 }
 
 // ===========================================================================================================
 
+// Displays a 'H' in right column
+void displayHighScoreReached() {
+  g_matrix.drawFastVLine(12, 8, 5, PIXEL_ON);
+  g_matrix.drawFastVLine(14, 8, 5, PIXEL_ON);
+  g_matrix.drawPixel(13, 10, PIXEL_ON);
+}
+
+
 // Update the whole 8 '7-digits-segments' with score and level
 void displayScoreAndLevel() {
-  g_matrix.fillScreen(PIXEL_OFF);
 
   // Level
   // -----
@@ -2671,12 +2700,14 @@ void dispRefreshMatrix() {
   g_matrix.drawFastVLine(10, 0, PLAYABLE_ROWS, PIXEL_ON);
 
 
-  // ============= Malus mode
+  // ============= Malus mode "logo"
   if (g_modeMalusLines == MODE_MALUS_LINES_ON) {
-    g_matrix.drawFastHLine(11, PLAYABLE_ROWS - 1, 5, PIXEL_ON);
+    g_matrix.drawPixel(12, PLAYABLE_ROWS - 1, PIXEL_ON);
+    g_matrix.drawPixel(13, PLAYABLE_ROWS - 1, PIXEL_ON);
+    g_matrix.drawPixel(15, PLAYABLE_ROWS - 1, PIXEL_ON);
   }
 
-  // ============= Next block mode
+  // ============= Next block
   if (g_modeNextBlock == MODE_NEXT_BLOCK_ON) {
     // Horizontal limit for the zone
     g_matrix.drawFastHLine(11, 6, 5, PIXEL_ON);
@@ -2726,17 +2757,43 @@ void dispRefreshMatrix() {
     }
   }
 
-  // Score in binary on right side of the playable zone
-  for (byte b = 0; b < 10; b++) {
-    g_matrix.drawPixel(15, PLAYABLE_ROWS - 3 - b, score & bit(b));
+  // ============= High score flag
+  if (isHighScoreBeaten()) {
+    displayHighScoreReached();
   }
 
-  // Grid
+  // ============= Score in binary on right side of the playable zone
+
+  // Display on TWO columns (one is not enough and colliding with the 'H' high score)
+  //   for (byte b = 0; b <= 6; b++) {
+  //     g_matrix.drawPixel(15, PLAYABLE_ROWS - 3 - b, score & bit(b));
+  //   }
+  //   for (byte b = 7; b <= 11; b++) {
+  //     g_matrix.drawPixel(14, PLAYABLE_ROWS - 3 - (b - 7), score & bit(b));
+  //   }
+
+  // Funnier : every 3 bits on a new row at bottom (after the malus mode line + spacer line)
+  // Score is encoded with 13 bits = 8192-1
+  for (byte b = 0; b < 3; b++) {
+    g_matrix.drawPixel(12 + b, PLAYABLE_ROWS - 3, score & bit(b));
+  }
+  for (byte b = 3; b < 6; b++) {
+    g_matrix.drawPixel(12 + b - 3, PLAYABLE_ROWS - 4, score & bit(b));
+  }
+  for (byte b = 6; b < 9; b++) {
+    g_matrix.drawPixel(12 + b - 6, PLAYABLE_ROWS - 5, score & bit(b));
+  }
+  for (byte b = 10; b < 12; b++) {
+    g_matrix.drawPixel(12 + b - 9, PLAYABLE_ROWS - 6, score & bit(b));
+  }
+
+  // ============= Grid
   for (byte y = 0; y < PLAYABLE_ROWS; y++) {
     for (byte x = 0; x < PLAYABLE_COLS; x++) {
       g_matrix.drawPixel(x, y + OFFSET_ROW, g_disp[x][y] ? PIXEL_ON : PIXEL_OFF);
     }
   }
+
   g_matrix.write();
 }
 
